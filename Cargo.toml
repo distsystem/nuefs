@@ -1,0 +1,15 @@
+[package]
+name = "nuefs_rs"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "_nuefs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
+fuser = "0.15"
+libc = "0.2"
+thiserror = "2"
+parking_lot = "0.12"
