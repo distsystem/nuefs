@@ -5,15 +5,32 @@ platforms = ["linux-64"]
 version = "0.1.0"
 
 [tasks]
-build = "maturin build --release"
-develop = "maturin develop --uv"
 check = "cargo check"
+kill = "pkill -9 nuefsd || true"
 
 [dependencies]
 rust = "*"
+python = "=3.12"
+
+[activation.env]
+# Ensure nuefsd links with conda sysroot startup objects (missing __libc_csu_init/fini otherwise).
+[feature.build.dependencies]
+c-compiler = "*"
 maturin = "*"
 uv = "*"
 
 [pypi-dependencies]
-maturin-import-hook = "*"
 sheaves = { path = "../sheaves", editable = true }
+nuefs = { path = ".", editable = true }
+
+[feature.build.activation.env]
+CONDA_BUILD = "1"
+PREFIX = "$CONDA_PREFIX"
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=$CONDA_PREFIX/x86_64-conda-linux-gnu/sysroot/usr/lib64/libc_nonshared.a"
+
+[feature.build.tasks]
+build = "maturin build --release"
+develop = "maturin develop --uv && cargo build --bin nuefsd && install -m 755 target/debug/nuefsd $CONDA_PREFIX/bin/nuefsd"
+
+[environments]
+build = ["build"]

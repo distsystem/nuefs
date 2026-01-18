@@ -14,37 +14,31 @@ use fuser::{
 };
 use parking_lot::RwLock;
 
-use crate::manifest::Manifest;
+use super::manager::Manifest;
 
 const TTL: Duration = Duration::from_secs(1);
 
-/// FUSE layered filesystem
-pub struct NueFs {
-    root: PathBuf,
+/// FUSE layered filesystem.
+pub(crate) struct NueFs {
+    real_root: PathBuf,
     manifest: Arc<Manifest>,
-    /// inode -> path mapping
     inodes: RwLock<HashMap<u64, String>>,
-    /// path -> inode mapping
     paths: RwLock<HashMap<String, u64>>,
-    /// Next inode number
     next_ino: AtomicU64,
-    /// Open file handles: fh -> File
     handles: RwLock<HashMap<u64, File>>,
-    /// Next file handle
     next_fh: AtomicU64,
 }
 
 impl NueFs {
-    pub fn new(root: PathBuf, manifest: Arc<Manifest>) -> Self {
+    pub(crate) fn new(real_root: PathBuf, manifest: Arc<Manifest>) -> Self {
         let mut inodes = HashMap::new();
         let mut paths = HashMap::new();
 
-        // Root inode is always 1
         inodes.insert(1, String::new());
         paths.insert(String::new(), 1);
 
         Self {
-            root,
+            real_root,
             manifest,
             inodes: RwLock::new(inodes),
             paths: RwLock::new(paths),
@@ -54,7 +48,6 @@ impl NueFs {
         }
     }
 
-    /// Get or create inode for a path
     fn get_or_create_ino(&self, path: &str) -> u64 {
         let paths = self.paths.read();
         if let Some(&ino) = paths.get(path) {
@@ -65,7 +58,6 @@ impl NueFs {
         let mut paths = self.paths.write();
         let mut inodes = self.inodes.write();
 
-        // Double-check after acquiring write lock
         if let Some(&ino) = paths.get(path) {
             return ino;
         }
@@ -76,12 +68,10 @@ impl NueFs {
         ino
     }
 
-    /// Get path for an inode
     fn get_path(&self, ino: u64) -> Option<String> {
         self.inodes.read().get(&ino).cloned()
     }
 
-    /// Get file attributes for a backend path
     fn get_attr(&self, ino: u64, backend_path: &PathBuf) -> Option<FileAttr> {
         let metadata = fs::metadata(backend_path).ok()?;
 
@@ -116,19 +106,19 @@ impl NueFs {
         })
     }
 
-    /// Allocate a new file handle
     fn alloc_fh(&self, file: File) -> u64 {
         let fh = self.next_fh.fetch_add(1, Ordering::SeqCst);
         self.handles.write().insert(fh, file);
         fh
     }
 
-    /// Get file for a handle
     fn get_file(&self, fh: u64) -> Option<File> {
-        self.handles.read().get(&fh).map(|f| f.try_clone().ok()).flatten()
+        self.handles
+            .read()
+            .get(&fh)
+            .and_then(|f| f.try_clone().ok())
     }
 
-    /// Release a file handle
     fn release_fh(&self, fh: u64) {
         self.handles.write().remove(&fh);
     }
@@ -148,7 +138,7 @@ impl Filesystem for NueFs {
         let child_path = if parent_path.is_empty() {
             name.to_string()
         } else {
-            format!("{}/{}", parent_path, name)
+            format!("{parent_path}/{name}")
         };
 
         let backend_path = match self.manifest.resolve(&child_path) {
@@ -176,7 +166,6 @@ impl Filesystem for NueFs {
             }
         };
 
-        // Root directory: return synthetic attrs to avoid recursive FUSE call
         if path.is_empty() {
             let now = SystemTime::now();
             let attr = FileAttr {
@@ -214,7 +203,14 @@ impl Filesystem for NueFs {
         }
     }
 
-    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
+    fn readdir(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
         let path = match self.get_path(ino) {
             Some(p) => p,
             None => {
@@ -232,10 +228,14 @@ impl Filesystem for NueFs {
             let child_path = if path.is_empty() {
                 name.clone()
             } else {
-                format!("{}/{}", path, name)
+                format!("{path}/{name}")
             };
             let child_ino = self.get_or_create_ino(&child_path);
-            let kind = if is_dir { FileType::Directory } else { FileType::RegularFile };
+            let kind = if is_dir {
+                FileType::Directory
+            } else {
+                FileType::RegularFile
+            };
             entries.push((child_ino, kind, name));
         }
 
@@ -281,7 +281,17 @@ impl Filesystem for NueFs {
         reply.opened(fh, 0);
     }
 
-    fn read(&mut self, _req: &Request, _ino: u64, fh: u64, offset: i64, size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
+    fn read(
+        &mut self,
+        _req: &Request,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyData,
+    ) {
         let mut file = match self.get_file(fh) {
             Some(f) => f,
             None => {
@@ -302,7 +312,18 @@ impl Filesystem for NueFs {
         }
     }
 
-    fn write(&mut self, _req: &Request, _ino: u64, fh: u64, offset: i64, data: &[u8], _write_flags: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyWrite) {
+    fn write(
+        &mut self,
+        _req: &Request,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
         let mut handles = self.handles.write();
         let file = match handles.get_mut(&fh) {
             Some(f) => f,
@@ -323,12 +344,30 @@ impl Filesystem for NueFs {
         }
     }
 
-    fn release(&mut self, _req: &Request, _ino: u64, fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
+    fn release(
+        &mut self,
+        _req: &Request,
+        _ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
         self.release_fh(fh);
         reply.ok();
     }
 
-    fn create(&mut self, _req: &Request, parent: u64, name: &OsStr, mode: u32, _umask: u32, flags: i32, reply: ReplyCreate) {
+    fn create(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
+    ) {
         let parent_path = match self.get_path(parent) {
             Some(p) => p,
             None => {
@@ -341,14 +380,12 @@ impl Filesystem for NueFs {
         let child_path = if parent_path.is_empty() {
             name.to_string()
         } else {
-            format!("{}/{}", parent_path, name)
+            format!("{parent_path}/{name}")
         };
 
-        // Determine where to create the file
         let target_dir = self.manifest.create_target(&parent_path);
         let backend_path = target_dir.join(&*name);
 
-        // Create parent directories if needed
         if let Some(parent) = backend_path.parent() {
             if let Err(e) = fs::create_dir_all(parent) {
                 reply.error(e.raw_os_error().unwrap_or(libc::EIO));
@@ -393,7 +430,7 @@ impl Filesystem for NueFs {
         let child_path = if parent_path.is_empty() {
             name.to_string()
         } else {
-            format!("{}/{}", parent_path, name)
+            format!("{parent_path}/{name}")
         };
 
         let backend_path = match self.manifest.resolve(&child_path) {
@@ -410,7 +447,15 @@ impl Filesystem for NueFs {
         }
     }
 
-    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, mode: u32, _umask: u32, reply: ReplyEntry) {
+    fn mkdir(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
         let parent_path = match self.get_path(parent) {
             Some(p) => p,
             None => {
@@ -423,7 +468,7 @@ impl Filesystem for NueFs {
         let child_path = if parent_path.is_empty() {
             name.to_string()
         } else {
-            format!("{}/{}", parent_path, name)
+            format!("{parent_path}/{name}")
         };
 
         let target_dir = self.manifest.create_target(&parent_path);
@@ -431,9 +476,9 @@ impl Filesystem for NueFs {
 
         match fs::create_dir(&backend_path) {
             Ok(()) => {
-                if let Err(e) = fs::set_permissions(&backend_path, fs::Permissions::from_mode(mode)) {
-                    // Non-fatal, continue
-                    eprintln!("Warning: failed to set permissions: {}", e);
+                if let Err(e) = fs::set_permissions(&backend_path, fs::Permissions::from_mode(mode))
+                {
+                    eprintln!("Warning: failed to set permissions: {e}");
                 }
             }
             Err(e) => {
@@ -463,7 +508,7 @@ impl Filesystem for NueFs {
         let child_path = if parent_path.is_empty() {
             name.to_string()
         } else {
-            format!("{}/{}", parent_path, name)
+            format!("{parent_path}/{name}")
         };
 
         let backend_path = match self.manifest.resolve(&child_path) {
@@ -480,7 +525,16 @@ impl Filesystem for NueFs {
         }
     }
 
-    fn rename(&mut self, _req: &Request, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr, _flags: u32, reply: ReplyEmpty) {
+    fn rename(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: ReplyEmpty,
+    ) {
         let parent_path = match self.get_path(parent) {
             Some(p) => p,
             None => {
@@ -503,13 +557,13 @@ impl Filesystem for NueFs {
         let old_path = if parent_path.is_empty() {
             name.to_string()
         } else {
-            format!("{}/{}", parent_path, name)
+            format!("{parent_path}/{name}")
         };
 
         let new_path = if newparent_path.is_empty() {
             newname.to_string()
         } else {
-            format!("{}/{}", newparent_path, newname)
+            format!("{newparent_path}/{newname}")
         };
 
         let old_backend = match self.manifest.resolve(&old_path) {
@@ -520,20 +574,13 @@ impl Filesystem for NueFs {
             }
         };
 
-        // For new path, determine where it should go
-        let new_backend = {
-            // If new path already exists, use its backend
-            if let Some(p) = self.manifest.resolve(&new_path) {
-                p
-            } else {
-                // Otherwise, determine based on parent
-                let target_dir = self.manifest.create_target(&newparent_path);
-                target_dir.join(&*newname)
-            }
+        let new_backend = if let Some(p) = self.manifest.resolve(&new_path) {
+            p
+        } else {
+            let target_dir = self.manifest.create_target(&newparent_path);
+            target_dir.join(&*newname)
         };
 
-        // Check if rename crosses backends (different mount points)
-        // For simplicity, we allow rename within the same filesystem
         match fs::rename(&old_backend, &new_backend) {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
@@ -567,7 +614,7 @@ impl Filesystem for NueFs {
         };
 
         let backend_path = if path.is_empty() {
-            self.root.clone()
+            self.real_root.clone()
         } else {
             match self.manifest.resolve(&path) {
                 Some(p) => p,
@@ -578,7 +625,6 @@ impl Filesystem for NueFs {
             }
         };
 
-        // Handle truncate
         if let Some(size) = size {
             if let Some(fh) = fh {
                 if let Some(file) = self.get_file(fh) {
@@ -593,7 +639,6 @@ impl Filesystem for NueFs {
             }
         }
 
-        // Handle chmod
         if let Some(mode) = mode {
             if let Err(e) = fs::set_permissions(&backend_path, fs::Permissions::from_mode(mode)) {
                 reply.error(e.raw_os_error().unwrap_or(libc::EIO));
@@ -601,13 +646,9 @@ impl Filesystem for NueFs {
             }
         }
 
-        // Handle chown (requires root)
         if uid.is_some() || gid.is_some() {
-            // Skip chown for now - requires unsafe and root
+            // Skip chown for now - requires unsafe and root.
         }
-
-        // Handle utimes
-        // TODO: implement atime/mtime setting
 
         match self.get_attr(ino, &backend_path) {
             Some(attr) => reply.attr(&TTL, &attr),
