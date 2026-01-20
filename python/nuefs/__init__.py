@@ -5,8 +5,10 @@ import os
 import pathlib
 import typing
 
-from nuefs._nuefs import Mapping, OwnerInfo
-from nuefs._nuefs import _get_manifest, _mount, _status, _unmount, _update, _which
+import nuefs._nuefs as _ext
+
+Mapping = _ext.Mapping
+OwnerInfo = _ext.OwnerInfo
 
 
 class Handle:
@@ -26,22 +28,19 @@ class Handle:
     @property
     def manifest(self) -> list[Mapping]:
         """Get the current mount manifest."""
-        return _get_manifest(self._mount_id)
+        return _ext._get_manifest(self._mount_id)
 
     def update(self, mounts: collections.abc.Sequence[Mapping]) -> None:
         """Update the mount manifest."""
-        _update(self._mount_id, list(mounts))
+        _ext._update(self._mount_id, list(mounts))
 
     def which(self, path: str) -> OwnerInfo | None:
         """Query which backend owns a path."""
-        try:
-            return _which(self._mount_id, path)
-        except RuntimeError:
-            return None
+        return _ext._which(self._mount_id, path)
 
     def close(self) -> None:
         """Close the mount."""
-        _unmount(self._mount_id)
+        _ext._unmount(self._mount_id)
 
     def __enter__(self) -> typing.Self:
         return self
@@ -67,18 +66,18 @@ def open(
     root_path = pathlib.Path(root).expanduser().resolve()
 
     if mounts is not None:
-        raw = _mount(root_path, list(mounts))
+        raw = _ext._mount(root_path, list(mounts))
         return Handle(str(raw.root), raw.mount_id)
 
-    for h in _status():
-        if pathlib.Path(h.root).resolve() == root_path:
-            return Handle(str(h.root), h.mount_id)
+    mount_id = _ext._resolve(root_path)
+    if mount_id is not None:
+        return Handle(str(root_path), mount_id)
     raise RuntimeError("Mount not found")
 
 
 def status() -> list[Handle]:
     """List all active mounts."""
-    return [Handle(str(h.root), h.mount_id) for h in _status()]
+    return [Handle(str(h.root), h.mount_id) for h in _ext._status()]
 
 
 __all__ = ["Handle", "Mapping", "OwnerInfo", "open", "status"]

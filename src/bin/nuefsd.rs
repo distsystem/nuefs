@@ -21,24 +21,13 @@ fn main() {
         }
     }
 
-    let socket = socket.unwrap_or_else(default_socket_path);
+    let socket = socket.unwrap_or_else(_nuefs::runtime::default_socket_path);
     if let Err(e) = _nuefs::daemon::server::serve(socket) {
         eprintln!("nuefsd: fatal error: {e}");
         std::process::exit(1);
     }
 }
 
-fn default_socket_path() -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-
-    let uid = unsafe { libc::geteuid() };
-    base.join(format!("nuefsd-{uid}.sock"))
-}
-
 fn print_help() {
     eprintln!("Usage: nuefsd [--socket PATH]");
 }
-

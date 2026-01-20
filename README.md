@@ -9,9 +9,9 @@ Named after [Nue (鵺)](https://en.wikipedia.org/wiki/Nue), a Japanese chimera w
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        Python                               │
-│  handle = nuefs.mount(root, mounts)  # API unchanged        │
-│  nuefs.which(handle, path)                                  │
-│  nuefs.unmount(handle)                                      │
+│  handle = nuefs.open(root, mounts)                          │
+│  handle.which(path)                                         │
+│  handle.close()                                             │
 └─────────────────────────────────────────────────────────────┘
                               │ pyo3 FFI
                               ▼
@@ -19,8 +19,8 @@ Named after [Nue (鵺)](https://en.wikipedia.org/wiki/Nue), a Japanese chimera w
 │                   Rust Extension (_nuefs.so)                │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
 │  │ #[pyclass]  │    │ IPC Client  │    │ Auto-start  │     │
-│  │ Mount       │    │ Unix Socket │    │ nuefsd      │     │
-│  │ MountHandle │    │ serde_json  │    │ (if needed) │     │
+│  │ Mapping     │    │ Unix Socket │    │ nuefsd      │     │
+│  │ RawHandle   │    │ serde_json  │    │ (if needed) │     │
 │  └─────────────┘    └─────────────┘    └─────────────┘     │
 └─────────────────────────────────────────────────────────────┘
                               │ IPC (Unix Socket)
@@ -62,19 +62,20 @@ nuefs/
 import nuefs
 from pathlib import Path
 
-handle = nuefs.mount(
+handle = nuefs.open(
     root=Path("~/project"),
     mounts=[
-        nuefs.Mount(target=".config/nvim", source="~/.layers/nvim"),
+        nuefs.Mapping(target=".config/nvim", source="~/.layers/nvim"),
     ],
 )
 
 # Query ownership
-info = nuefs.which(handle, ".config/nvim/init.lua")
-print(f"Owner: {info.owner}, Path: {info.backend_path}")
+info = handle.which(".config/nvim/init.lua")
+if info:
+    print(f"Owner: {info.owner}, Path: {info.backend_path}")
 
 # Unmount
-nuefs.unmount(handle)
+handle.close()
 ```
 
 ## Requirements

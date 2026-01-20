@@ -23,7 +23,6 @@ pub struct MountStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    Ping,
     Mount { root: PathBuf, mounts: Vec<MountSpec> },
     Unmount { mount_id: u64 },
     Which { mount_id: u64, path: String },
@@ -43,7 +42,6 @@ pub enum Response {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseData {
-    Pong,
     Mounted { mount_id: u64 },
     Unmounted,
     Which { info: Option<OwnerInfoWire> },
@@ -52,4 +50,3 @@ pub enum ResponseData {
     Updated,
     Manifest { mounts: Vec<MountSpec> },
 }
-

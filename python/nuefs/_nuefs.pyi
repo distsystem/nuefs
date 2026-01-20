@@ -40,6 +40,12 @@ def _mount(root:builtins.str | os.PathLike | pathlib.Path, mounts:typing.Sequenc
     """
     ...
 
+def _resolve(root:builtins.str | os.PathLike | pathlib.Path) -> typing.Optional[builtins.int]:
+    r"""
+    Resolve an existing mount by root. Returns mount_id if found.
+    """
+    ...
+
 def _status() -> builtins.list[RawHandle]:
     r"""
     List all active mounts.
@@ -58,9 +64,9 @@ def _update(mount_id:builtins.int, mounts:typing.Sequence[Mapping]) -> None:
     """
     ...
 
-def _which(mount_id:builtins.int, path:builtins.str) -> OwnerInfo:
+def _which(mount_id:builtins.int, path:builtins.str) -> typing.Optional[OwnerInfo]:
     r"""
-    Query path owner. Raises RuntimeError if not found.
+    Query path owner. Returns None if not found.
     """
     ...
 

@@ -54,7 +54,6 @@ impl Manager {
 
     pub fn handle(&mut self, request: Request) -> Response {
         let result = match request {
-            Request::Ping => Ok(ResponseData::Pong),
             Request::Mount { root, mounts } => self
                 .mount(root, mounts)
                 .map(|mount_id| ResponseData::Mounted { mount_id }),
@@ -157,9 +156,9 @@ impl Manager {
     }
 
     fn resolve(&self, root: PathBuf) -> Result<Option<u64>, ManagerError> {
-        let root = root
-            .canonicalize()
-            .map_err(|e| ManagerError::InvalidRoot(e.to_string()))?;
+        let Ok(root) = root.canonicalize() else {
+            return Ok(None);
+        };
         Ok(self.mounts_by_root.get(&root).copied())
     }
 
@@ -204,8 +203,6 @@ struct Entry {
 pub(crate) struct Manifest {
     display_root: PathBuf,
     access_root: PathBuf,
-    #[allow(dead_code)]
-    mounts: Vec<MountSpec>,
     entries: HashMap<String, Entry>,
 }
 
@@ -218,11 +215,10 @@ impl Manifest {
         let mut manifest = Self {
             display_root: display_root.to_path_buf(),
             access_root: access_root.to_path_buf(),
-            mounts: mounts.to_vec(),
             entries: HashMap::new(),
         };
 
-        manifest.scan_real(access_root, "")?;
+        manifest.scan_real(access_root)?;
 
         for mount in mounts.iter().rev() {
             manifest.scan_layer(mount)?;
@@ -231,60 +227,10 @@ impl Manifest {
         Ok(manifest)
     }
 
-    fn scan_real(&mut self, base: &Path, prefix: &str) -> Result<(), ManifestError> {
-        let dir = if prefix.is_empty() {
-            base.to_path_buf()
-        } else {
-            base.join(prefix)
-        };
-
-        if !dir.exists() {
-            return Ok(());
-        }
-
-        for entry in fs::read_dir(&dir).map_err(|e| ManifestError::Io(dir.clone(), e))? {
-            let entry = entry.map_err(|e| ManifestError::Io(dir.clone(), e))?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            let rel_path = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-
-            let metadata = entry
-                .metadata()
-                .map_err(|e| ManifestError::Io(entry.path(), e))?;
-            let is_dir = metadata.is_dir();
-
-            self.entries.insert(
-                rel_path.clone(),
-                Entry {
-                    source: Source::Real,
-                    is_dir,
-                },
-            );
-
-            if is_dir {
-                self.scan_real(base, &rel_path)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn scan_layer(&mut self, mount: &MountSpec) -> Result<(), ManifestError> {
-        let target = mount.target.to_string_lossy();
-        let target = target.trim_start_matches("./");
-        let target = if target == "." { "" } else { target };
-        self.scan_layer_dir(&mount.source, target, mount)
-    }
-
-    fn scan_layer_dir(
-        &mut self,
-        dir: &Path,
-        prefix: &str,
-        mount: &MountSpec,
-    ) -> Result<(), ManifestError> {
+    fn walk_dir<F>(&mut self, dir: &Path, prefix: &str, on_entry: &mut F) -> Result<(), ManifestError>
+    where
+        F: FnMut(&mut Self, &str, &Path, bool) -> Result<(), ManifestError>,
+    {
         if !dir.exists() {
             return Ok(());
         }
@@ -303,32 +249,68 @@ impl Manifest {
                 .map_err(|e| ManifestError::Io(entry.path(), e))?;
             let is_dir = metadata.is_dir();
 
-            let existing = self.entries.get(&rel_path);
-            let should_insert = match existing {
+            on_entry(self, &rel_path, &entry.path(), is_dir)?;
+
+            if is_dir {
+                self.walk_dir(&entry.path(), &rel_path, on_entry)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn scan_real(&mut self, dir: &Path) -> Result<(), ManifestError> {
+        let mut on_entry = |manifest: &mut Self, rel_path: &str, _entry_path: &Path, is_dir: bool| {
+            manifest.entries.insert(
+                rel_path.to_string(),
+                Entry {
+                    source: Source::Real,
+                    is_dir,
+                },
+            );
+            Ok(())
+        };
+        self.walk_dir(dir, "", &mut on_entry)
+    }
+
+    fn normalize_target(target: &Path) -> String {
+        let target = target.to_string_lossy();
+        let target = target.trim_start_matches("./");
+        if target == "." {
+            String::new()
+        } else {
+            target.to_string()
+        }
+    }
+
+    fn scan_layer(&mut self, mount: &MountSpec) -> Result<(), ManifestError> {
+        let target = Self::normalize_target(&mount.target);
+        let source_root = mount.source.clone();
+
+        let mut on_entry = |manifest: &mut Self, rel_path: &str, entry_path: &Path, is_dir: bool| {
+            let should_insert = match manifest.entries.get(rel_path) {
                 None => true,
-                Some(e) if e.is_dir && is_dir => false,
+                Some(existing) if existing.is_dir && is_dir => false,
                 Some(_) => true,
             };
 
             if should_insert {
-                self.entries.insert(
-                    rel_path.clone(),
+                manifest.entries.insert(
+                    rel_path.to_string(),
                     Entry {
                         source: Source::Layer {
-                            source_root: mount.source.clone(),
-                            backend_path: entry.path(),
+                            source_root: source_root.clone(),
+                            backend_path: entry_path.to_path_buf(),
                         },
                         is_dir,
                     },
                 );
             }
 
-            if is_dir {
-                self.scan_layer_dir(&entry.path(), &rel_path, mount)?;
-            }
-        }
+            Ok(())
+        };
 
-        Ok(())
+        self.walk_dir(&mount.source, &target, &mut on_entry)
     }
 
     pub(crate) fn which(&self, path: &str) -> Option<OwnerInfoWire> {

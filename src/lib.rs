@@ -1,5 +1,6 @@
 mod client;
 pub mod daemon;
+pub mod runtime;
 mod types;
 
 use std::path::PathBuf;
@@ -12,6 +13,24 @@ use crate::client::Client;
 use crate::types::MountSpec;
 
 define_stub_info_gatherer!(stub_info);
+
+impl From<Mapping> for MountSpec {
+    fn from(mapping: Mapping) -> Self {
+        Self {
+            target: mapping.target,
+            source: mapping.source,
+        }
+    }
+}
+
+impl From<MountSpec> for Mapping {
+    fn from(spec: MountSpec) -> Self {
+        Self {
+            target: spec.target,
+            source: spec.source,
+        }
+    }
+}
 
 /// Single path mapping: source directory -> target path within mount root.
 #[gen_stub_pyclass]
@@ -65,13 +84,7 @@ fn _mount(root: PathBuf, mounts: Vec<Mapping>) -> PyResult<RawHandle> {
         PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Invalid root path: {e}"))
     })?;
 
-    let mounts = mounts
-        .into_iter()
-        .map(|m| MountSpec {
-            target: m.target,
-            source: m.source,
-        })
-        .collect();
+    let mounts: Vec<MountSpec> = mounts.into_iter().map(Into::into).collect();
 
     let client = Client::new();
     let mount_id = client.mount(root.clone(), mounts).map_err(to_pyerr)?;
@@ -102,36 +115,34 @@ fn _status() -> PyResult<Vec<RawHandle>> {
         .collect())
 }
 
-/// Query path owner. Raises RuntimeError if not found.
+/// Query path owner. Returns None if not found.
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn _which(mount_id: u64, path: String) -> PyResult<OwnerInfo> {
+fn _which(mount_id: u64, path: String) -> PyResult<Option<OwnerInfo>> {
     let client = Client::new();
-    let info = client
-        .which(mount_id, path)
-        .map_err(to_pyerr)?
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Path not found"))?;
-
-    Ok(OwnerInfo {
+    let info = client.which(mount_id, path).map_err(to_pyerr)?;
+    Ok(info.map(|info| OwnerInfo {
         owner: info.owner,
         backend_path: info.backend_path,
-    })
+    }))
 }
 
 /// Update mount manifest.
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn _update(mount_id: u64, mounts: Vec<Mapping>) -> PyResult<()> {
-    let mounts = mounts
-        .into_iter()
-        .map(|m| MountSpec {
-            target: m.target,
-            source: m.source,
-        })
-        .collect();
+    let mounts: Vec<MountSpec> = mounts.into_iter().map(Into::into).collect();
 
     let client = Client::new();
     client.update(mount_id, mounts).map_err(to_pyerr)
+}
+
+/// Resolve an existing mount by root. Returns mount_id if found.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn _resolve(root: PathBuf) -> PyResult<Option<u64>> {
+    let client = Client::new();
+    client.resolve(root).map_err(to_pyerr)
 }
 
 /// Get current mount manifest.
@@ -141,13 +152,7 @@ fn _get_manifest(mount_id: u64) -> PyResult<Vec<Mapping>> {
     let client = Client::new();
     let mounts = client.get_manifest(mount_id).map_err(to_pyerr)?;
 
-    Ok(mounts
-        .into_iter()
-        .map(|m| Mapping {
-            target: m.target,
-            source: m.source,
-        })
-        .collect())
+    Ok(mounts.into_iter().map(Into::into).collect())
 }
 
 fn to_pyerr(err: crate::client::ClientError) -> PyErr {
@@ -164,6 +169,7 @@ fn _nuefs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_status, m)?)?;
     m.add_function(wrap_pyfunction!(_which, m)?)?;
     m.add_function(wrap_pyfunction!(_update, m)?)?;
+    m.add_function(wrap_pyfunction!(_resolve, m)?)?;
     m.add_function(wrap_pyfunction!(_get_manifest, m)?)?;
     Ok(())
 }

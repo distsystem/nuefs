@@ -9,7 +9,6 @@ use thiserror::Error;
 
 use crate::types::{MountSpec, MountStatus, OwnerInfoWire, Request, Response, ResponseData};
 
-const SOCKET_ENV: &str = "NUEFSD_SOCKET";
 const BIN_ENV: &str = "NUEFSD_BIN";
 
 #[derive(Debug, Error)]
@@ -41,7 +40,7 @@ pub struct Client {
 impl Client {
     pub fn new() -> Self {
         Self {
-            socket_path: default_socket_path(),
+            socket_path: crate::runtime::default_socket_path(),
             daemon_bin: std::env::var(BIN_ENV).unwrap_or_else(|_| "nuefsd".to_string()),
         }
     }
@@ -106,6 +105,16 @@ impl Client {
         }
     }
 
+    pub fn resolve(&self, root: PathBuf) -> Result<Option<u64>, ClientError> {
+        let response = self.request(&Request::Resolve { root })?;
+        match response {
+            Response::Ok {
+                data: ResponseData::Resolved { mount_id },
+            } => Ok(mount_id),
+            other => Err(ClientError::InvalidResponse(format!("{other:?}"))),
+        }
+    }
+
     fn request(&self, request: &Request) -> Result<Response, ClientError> {
         self.ensure_daemon()?;
 
@@ -152,20 +161,6 @@ impl Client {
             source: std::io::Error::new(std::io::ErrorKind::TimedOut, "daemon did not become ready"),
         })
     }
-}
-
-pub(crate) fn default_socket_path() -> PathBuf {
-    if let Some(path) = std::env::var_os(SOCKET_ENV) {
-        return PathBuf::from(path);
-    }
-
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-
-    let uid = unsafe { libc::geteuid() };
-    base.join(format!("nuefsd-{uid}.sock"))
 }
 
 fn spawn_daemon(daemon_bin: &str, socket_path: &PathBuf) -> Result<(), std::io::Error> {
