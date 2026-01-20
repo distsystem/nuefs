@@ -46,40 +46,21 @@ pub struct OwnerInfo {
     pub backend_path: PathBuf,
 }
 
-/// Handle to a mounted NueFS filesystem.
+/// Raw handle data from NueFS daemon.
 #[gen_stub_pyclass]
 #[pyclass]
 #[derive(Clone, Debug)]
-pub struct MountHandle {
-    #[pyo3(get)]
-    root: PathBuf,
-    mount_id: u64,
-}
-
-#[gen_stub_pymethods]
-#[pymethods]
-impl MountHandle {
-    /// Check if the mount is still tracked by the daemon.
-    fn is_mounted(&self) -> PyResult<bool> {
-        let client = Client::new();
-        let mounts = client.status().map_err(to_pyerr)?;
-        Ok(mounts.iter().any(|m| m.mount_id == self.mount_id))
-    }
-}
-
-#[gen_stub_pyclass]
-#[pyclass]
-#[derive(Clone, Debug)]
-pub struct MountStatus {
-    #[pyo3(get)]
-    pub mount_id: u64,
+pub struct RawHandle {
     #[pyo3(get)]
     pub root: PathBuf,
+    #[pyo3(get)]
+    pub mount_id: u64,
 }
 
+/// Create a new mount.
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn mount(root: PathBuf, mounts: Vec<Mapping>) -> PyResult<MountHandle> {
+fn _mount(root: PathBuf, mounts: Vec<Mapping>) -> PyResult<RawHandle> {
     let root = root.canonicalize().map_err(|e| {
         PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Invalid root path: {e}"))
     })?;
@@ -95,104 +76,52 @@ fn mount(root: PathBuf, mounts: Vec<Mapping>) -> PyResult<MountHandle> {
     let client = Client::new();
     let mount_id = client.mount(root.clone(), mounts).map_err(to_pyerr)?;
 
-    Ok(MountHandle { root, mount_id })
+    Ok(RawHandle { root, mount_id })
 }
 
+/// Unmount by mount_id.
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn unmount(handle: &MountHandle) -> PyResult<()> {
+fn _unmount(mount_id: u64) -> PyResult<()> {
     let client = Client::new();
-    client.unmount(handle.mount_id).map_err(to_pyerr)?;
-    Ok(())
+    client.unmount(mount_id).map_err(to_pyerr)
 }
 
+/// List all active mounts.
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn which(handle: &MountHandle, path: &str) -> PyResult<Option<OwnerInfo>> {
+fn _status() -> PyResult<Vec<RawHandle>> {
     let client = Client::new();
-    let info = client
-        .which(handle.mount_id, path.to_string())
-        .map_err(to_pyerr)?;
-
-    Ok(info.map(|i| OwnerInfo {
-        owner: i.owner,
-        backend_path: i.backend_path,
-    }))
-}
-
-#[gen_stub_pyfunction]
-#[pyfunction]
-fn status(root: Option<PathBuf>) -> PyResult<Vec<MountStatus>> {
-    let filter_root = match root {
-        Some(r) => Some(r.canonicalize().map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Invalid root path: {e}"))
-        })?),
-        None => None,
-    };
-
-    let client = Client::new();
-    let mut mounts = client.status().map_err(to_pyerr)?;
-
-    if let Some(root) = filter_root {
-        mounts.retain(|m| m.root == root);
-    }
-
+    let mounts = client.status().map_err(to_pyerr)?;
     Ok(mounts
         .into_iter()
-        .map(|m| MountStatus {
-            mount_id: m.mount_id,
+        .map(|m| RawHandle {
             root: m.root,
+            mount_id: m.mount_id,
         })
         .collect())
 }
 
+/// Query path owner. Raises RuntimeError if not found.
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn unmount_root(root: PathBuf) -> PyResult<()> {
-    let root = root.canonicalize().map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Invalid root path: {e}"))
-    })?;
-
+fn _which(mount_id: u64, path: String) -> PyResult<OwnerInfo> {
     let client = Client::new();
-    let mount_id = client.resolve(root).map_err(to_pyerr)?;
-    let Some(mount_id) = mount_id else {
-        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Mount not found",
-        ));
-    };
-
-    client.unmount(mount_id).map_err(to_pyerr)?;
-    Ok(())
-}
-
-#[gen_stub_pyfunction]
-#[pyfunction]
-fn which_root(root: PathBuf, path: &str) -> PyResult<Option<OwnerInfo>> {
-    let root = root.canonicalize().map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Invalid root path: {e}"))
-    })?;
-
-    let client = Client::new();
-    let mount_id = client.resolve(root).map_err(to_pyerr)?;
-    let Some(mount_id) = mount_id else {
-        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Mount not found",
-        ));
-    };
-
     let info = client
-        .which(mount_id, path.to_string())
-        .map_err(to_pyerr)?;
+        .which(mount_id, path)
+        .map_err(to_pyerr)?
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Path not found"))?;
 
-    Ok(info.map(|i| OwnerInfo {
-        owner: i.owner,
-        backend_path: i.backend_path,
-    }))
+    Ok(OwnerInfo {
+        owner: info.owner,
+        backend_path: info.backend_path,
+    })
 }
 
+/// Update mount manifest.
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn update(handle: &MountHandle, mounts: Vec<Mapping>) -> PyResult<()> {
+fn _update(mount_id: u64, mounts: Vec<Mapping>) -> PyResult<()> {
     let mounts = mounts
         .into_iter()
         .map(|m| MountSpec {
@@ -202,14 +131,15 @@ fn update(handle: &MountHandle, mounts: Vec<Mapping>) -> PyResult<()> {
         .collect();
 
     let client = Client::new();
-    client.update(handle.mount_id, mounts).map_err(to_pyerr)
+    client.update(mount_id, mounts).map_err(to_pyerr)
 }
 
+/// Get current mount manifest.
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn get_manifest(handle: &MountHandle) -> PyResult<Vec<Mapping>> {
+fn _get_manifest(mount_id: u64) -> PyResult<Vec<Mapping>> {
     let client = Client::new();
-    let mounts = client.get_manifest(handle.mount_id).map_err(to_pyerr)?;
+    let mounts = client.get_manifest(mount_id).map_err(to_pyerr)?;
 
     Ok(mounts
         .into_iter()
@@ -227,16 +157,13 @@ fn to_pyerr(err: crate::client::ClientError) -> PyErr {
 #[pymodule]
 fn _nuefs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Mapping>()?;
-    m.add_class::<MountHandle>()?;
+    m.add_class::<RawHandle>()?;
     m.add_class::<OwnerInfo>()?;
-    m.add_class::<MountStatus>()?;
-    m.add_function(wrap_pyfunction!(mount, m)?)?;
-    m.add_function(wrap_pyfunction!(unmount, m)?)?;
-    m.add_function(wrap_pyfunction!(which, m)?)?;
-    m.add_function(wrap_pyfunction!(status, m)?)?;
-    m.add_function(wrap_pyfunction!(unmount_root, m)?)?;
-    m.add_function(wrap_pyfunction!(which_root, m)?)?;
-    m.add_function(wrap_pyfunction!(update, m)?)?;
-    m.add_function(wrap_pyfunction!(get_manifest, m)?)?;
+    m.add_function(wrap_pyfunction!(_mount, m)?)?;
+    m.add_function(wrap_pyfunction!(_unmount, m)?)?;
+    m.add_function(wrap_pyfunction!(_status, m)?)?;
+    m.add_function(wrap_pyfunction!(_which, m)?)?;
+    m.add_function(wrap_pyfunction!(_update, m)?)?;
+    m.add_function(wrap_pyfunction!(_get_manifest, m)?)?;
     Ok(())
 }

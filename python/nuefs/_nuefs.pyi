@@ -14,22 +14,6 @@ class Mapping:
     source: builtins.str
     def __new__(cls,target:builtins.str | os.PathLike | pathlib.Path, source:builtins.str | os.PathLike | pathlib.Path): ...
 
-class MountHandle:
-    r"""
-    Handle to a mounted NueFS filesystem.
-    """
-    root: builtins.str
-    def is_mounted(self) -> builtins.bool:
-        r"""
-        Check if the mount is still tracked by the daemon.
-        """
-        ...
-
-
-class MountStatus:
-    mount_id: builtins.int
-    root: builtins.str
-
 class OwnerInfo:
     r"""
     Information about which backend owns a path.
@@ -37,27 +21,46 @@ class OwnerInfo:
     owner: builtins.str
     backend_path: builtins.str
 
-def get_manifest(handle:MountHandle) -> builtins.list[Mapping]:
+class RawHandle:
+    r"""
+    Raw handle data from NueFS daemon.
+    """
+    root: builtins.str
+    mount_id: builtins.int
+
+def _get_manifest(mount_id:builtins.int) -> builtins.list[Mapping]:
+    r"""
+    Get current mount manifest.
+    """
     ...
 
-def mount(root:builtins.str | os.PathLike | pathlib.Path, mounts:typing.Sequence[Mapping]) -> MountHandle:
+def _mount(root:builtins.str | os.PathLike | pathlib.Path, mounts:typing.Sequence[Mapping]) -> RawHandle:
+    r"""
+    Create a new mount.
+    """
     ...
 
-def status(root:typing.Optional[builtins.str | os.PathLike | pathlib.Path]) -> builtins.list[MountStatus]:
+def _status() -> builtins.list[RawHandle]:
+    r"""
+    List all active mounts.
+    """
     ...
 
-def unmount(handle:MountHandle) -> None:
+def _unmount(mount_id:builtins.int) -> None:
+    r"""
+    Unmount by mount_id.
+    """
     ...
 
-def unmount_root(root:builtins.str | os.PathLike | pathlib.Path) -> None:
+def _update(mount_id:builtins.int, mounts:typing.Sequence[Mapping]) -> None:
+    r"""
+    Update mount manifest.
+    """
     ...
 
-def update(handle:MountHandle, mounts:typing.Sequence[Mapping]) -> None:
-    ...
-
-def which(handle:MountHandle, path:builtins.str) -> typing.Optional[OwnerInfo]:
-    ...
-
-def which_root(root:builtins.str | os.PathLike | pathlib.Path, path:builtins.str) -> typing.Optional[OwnerInfo]:
+def _which(mount_id:builtins.int, path:builtins.str) -> OwnerInfo:
+    r"""
+    Query path owner. Raises RuntimeError if not found.
+    """
     ...
 

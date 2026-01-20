@@ -11,7 +11,7 @@ import sheaves.cli
 import nuefs
 
 
-def _load_mounts(config_path: pathlib.Path) -> list[nuefs.Mount]:
+def _load_mounts(config_path: pathlib.Path) -> list[nuefs.Mapping]:
     data = json.loads(config_path.read_text(encoding="utf-8"))
     if isinstance(data, dict):
         mounts = data.get("mounts")
@@ -21,14 +21,14 @@ def _load_mounts(config_path: pathlib.Path) -> list[nuefs.Mount]:
     if not isinstance(mounts, list):
         raise ValueError("Invalid config: expected a list or an object with 'mounts' list")
 
-    result: list[nuefs.Mount] = []
+    result: list[nuefs.Mapping] = []
     for item in mounts:
         if not isinstance(item, dict):
             raise ValueError("Invalid mount entry: expected an object")
 
         target = pathlib.Path(str(item.get("target", "")))
         source = pathlib.Path(str(item.get("source", ""))).expanduser()
-        result.append(nuefs.Mount(target=target, source=source))
+        result.append(nuefs.Mapping(target=target, source=source))
 
     return result
 
@@ -50,7 +50,7 @@ class Mount(NueFSSheaf):
             raise ValueError("--config is required (JSON file with mounts)")
 
         mounts = _load_mounts(self.config.expanduser())
-        handle = nuefs.mount(root, mounts)
+        handle = nuefs.open(root, mounts)
         if not self.foreground:
             return
 
@@ -58,7 +58,7 @@ class Mount(NueFSSheaf):
             while True:
                 time.sleep(3600)
         except KeyboardInterrupt:
-            nuefs.unmount(handle)
+            handle.close()
 
 
 class Unmount(NueFSSheaf):
@@ -67,7 +67,7 @@ class Unmount(NueFSSheaf):
     root: Annotated[pathlib.Path, sheaves.cli.Positional("Mount root directory")]
 
     def run(self) -> None:
-        nuefs.unmount_root(self.root.expanduser())
+        nuefs.open(self.root.expanduser()).close()
 
 
 class Which(NueFSSheaf):
@@ -77,7 +77,7 @@ class Which(NueFSSheaf):
     path: Annotated[str, sheaves.cli.Positional("Path to query")]
 
     def run(self) -> None:
-        info = nuefs.which_root(self.root.expanduser(), self.path)
+        info = nuefs.open(self.root.expanduser()).which(self.path)
         if info is None:
             print("not found")
             return
@@ -87,13 +87,9 @@ class Which(NueFSSheaf):
 class Status(NueFSSheaf):
     """Show NueFS mount status."""
 
-    root: Annotated[pathlib.Path | None, sheaves.cli.Positional("Mount root directory (optional)", nargs="?")] = None
-
     def run(self) -> None:
-        root = self.root.expanduser() if self.root is not None else None
-        mounts = nuefs.status(root)
-        for m in mounts:
-            print(f"{m.mount_id}\t{m.root}")
+        for h in nuefs.status():
+            print(f"{h.root}")
 
 
 def main() -> int:

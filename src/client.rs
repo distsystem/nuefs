@@ -86,16 +86,6 @@ impl Client {
         }
     }
 
-    pub fn resolve(&self, root: PathBuf) -> Result<Option<u64>, ClientError> {
-        let response = self.request(&Request::Resolve { root })?;
-        match response {
-            Response::Ok {
-                data: ResponseData::Resolved { mount_id },
-            } => Ok(mount_id),
-            other => Err(ClientError::InvalidResponse(format!("{other:?}"))),
-        }
-    }
-
     pub fn update(&self, mount_id: u64, mounts: Vec<MountSpec>) -> Result<(), ClientError> {
         let response = self.request(&Request::Update { mount_id, mounts })?;
         match response {
