@@ -96,6 +96,26 @@ impl Client {
         }
     }
 
+    pub fn update(&self, mount_id: u64, mounts: Vec<MountSpec>) -> Result<(), ClientError> {
+        let response = self.request(&Request::Update { mount_id, mounts })?;
+        match response {
+            Response::Ok {
+                data: ResponseData::Updated,
+            } => Ok(()),
+            other => Err(ClientError::InvalidResponse(format!("{other:?}"))),
+        }
+    }
+
+    pub fn get_manifest(&self, mount_id: u64) -> Result<Vec<MountSpec>, ClientError> {
+        let response = self.request(&Request::GetManifest { mount_id })?;
+        match response {
+            Response::Ok {
+                data: ResponseData::Manifest { mounts },
+            } => Ok(mounts),
+            other => Err(ClientError::InvalidResponse(format!("{other:?}"))),
+        }
+    }
+
     fn request(&self, request: &Request) -> Result<Response, ClientError> {
         self.ensure_daemon()?;
 

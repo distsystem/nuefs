@@ -4,6 +4,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use parking_lot::RwLock;
 use thiserror::Error;
 
 use crate::types::{MountSpec, MountStatus, OwnerInfoWire, Request, Response, ResponseData};
@@ -36,9 +37,9 @@ pub struct Manager {
 
 struct MountSession {
     root: PathBuf,
-    #[allow(dead_code)]
     real_root_fd: File,
-    manifest: Arc<Manifest>,
+    mounts: Vec<MountSpec>,
+    manifest: Arc<RwLock<Manifest>>,
     session: Option<fuser::BackgroundSession>,
 }
 
@@ -67,6 +68,12 @@ impl Manager {
             Request::Resolve { root } => self
                 .resolve(root)
                 .map(|mount_id| ResponseData::Resolved { mount_id }),
+            Request::Update { mount_id, mounts } => {
+                self.update(mount_id, mounts).map(|()| ResponseData::Updated)
+            }
+            Request::GetManifest { mount_id } => self
+                .get_manifest(mount_id)
+                .map(|mounts| ResponseData::Manifest { mounts }),
         };
 
         match result {
@@ -89,7 +96,7 @@ impl Manager {
         let real_root_fd = File::open(&root)?;
         let access_root = PathBuf::from(format!("/proc/self/fd/{}", real_root_fd.as_raw_fd()));
 
-        let manifest = Arc::new(Manifest::build(&root, &access_root, &mounts)?);
+        let manifest = Arc::new(RwLock::new(Manifest::build(&root, &access_root, &mounts)?));
         let fs = NueFs::new(access_root, manifest.clone());
 
         let options = vec![fuser::MountOption::FSName("nuefs".to_string())];
@@ -103,6 +110,7 @@ impl Manager {
             MountSession {
                 root: root.clone(),
                 real_root_fd,
+                mounts,
                 manifest,
                 session: Some(session),
             },
@@ -132,7 +140,7 @@ impl Manager {
             .mounts
             .get(&mount_id)
             .ok_or(ManagerError::UnknownMountId(mount_id))?;
-        Ok(session.manifest.which(path))
+        Ok(session.manifest.read().which(path))
     }
 
     fn status(&self) -> Vec<MountStatus> {
@@ -153,6 +161,29 @@ impl Manager {
             .canonicalize()
             .map_err(|e| ManagerError::InvalidRoot(e.to_string()))?;
         Ok(self.mounts_by_root.get(&root).copied())
+    }
+
+    fn update(&mut self, mount_id: u64, new_mounts: Vec<MountSpec>) -> Result<(), ManagerError> {
+        let session = self
+            .mounts
+            .get_mut(&mount_id)
+            .ok_or(ManagerError::UnknownMountId(mount_id))?;
+
+        let access_root = PathBuf::from(format!("/proc/self/fd/{}", session.real_root_fd.as_raw_fd()));
+        let new_manifest = Manifest::build(&session.root, &access_root, &new_mounts)?;
+
+        session.mounts = new_mounts;
+        *session.manifest.write() = new_manifest;
+
+        Ok(())
+    }
+
+    fn get_manifest(&self, mount_id: u64) -> Result<Vec<MountSpec>, ManagerError> {
+        let session = self
+            .mounts
+            .get(&mount_id)
+            .ok_or(ManagerError::UnknownMountId(mount_id))?;
+        Ok(session.mounts.clone())
     }
 }
 

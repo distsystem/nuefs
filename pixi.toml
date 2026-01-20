@@ -22,6 +22,8 @@ uv = "*"
 [pypi-dependencies]
 sheaves = { path = "../sheaves", editable = true }
 nuefs = { path = ".", editable = true }
+pyyaml = "*"
+returns = "*"
 
 [feature.build.activation.env]
 CONDA_BUILD = "1"

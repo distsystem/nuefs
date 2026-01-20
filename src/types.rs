@@ -29,6 +29,8 @@ pub enum Request {
     Which { mount_id: u64, path: String },
     Status,
     Resolve { root: PathBuf },
+    Update { mount_id: u64, mounts: Vec<MountSpec> },
+    GetManifest { mount_id: u64 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,5 +49,7 @@ pub enum ResponseData {
     Which { info: Option<OwnerInfoWire> },
     Status { mounts: Vec<MountStatus> },
     Resolved { mount_id: Option<u64> },
+    Updated,
+    Manifest { mounts: Vec<MountSpec> },
 }
 

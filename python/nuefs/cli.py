@@ -4,9 +4,7 @@ import json
 import pathlib
 import sys
 import time
-import typing
-
-import tyro
+from typing import Annotated
 
 import sheaves.cli
 
@@ -42,9 +40,9 @@ class NueFSSheaf(sheaves.cli.Command, app_name="nuefs"):
 class Mount(NueFSSheaf):
     """Mount NueFS filesystem."""
 
-    root: typing.Annotated[pathlib.Path, tyro.conf.Positional]
-    config: pathlib.Path | None = None
-    foreground: bool = False
+    root: Annotated[pathlib.Path, sheaves.cli.Positional("Mount root directory")]
+    config: Annotated[pathlib.Path | None, sheaves.cli.Option(help="JSON config file with mounts")] = None
+    foreground: Annotated[bool, sheaves.cli.Flag(help="Run in foreground", short="-f")] = False
 
     def run(self) -> None:
         root = self.root.expanduser()
@@ -66,7 +64,7 @@ class Mount(NueFSSheaf):
 class Unmount(NueFSSheaf):
     """Unmount NueFS filesystem."""
 
-    root: typing.Annotated[pathlib.Path, tyro.conf.Positional]
+    root: Annotated[pathlib.Path, sheaves.cli.Positional("Mount root directory")]
 
     def run(self) -> None:
         nuefs.unmount_root(self.root.expanduser())
@@ -75,8 +73,8 @@ class Unmount(NueFSSheaf):
 class Which(NueFSSheaf):
     """Query path ownership in mounted NueFS."""
 
-    root: typing.Annotated[pathlib.Path, tyro.conf.Positional]
-    path: typing.Annotated[str, tyro.conf.Positional]
+    root: Annotated[pathlib.Path, sheaves.cli.Positional("Mount root directory")]
+    path: Annotated[str, sheaves.cli.Positional("Path to query")]
 
     def run(self) -> None:
         info = nuefs.which_root(self.root.expanduser(), self.path)
@@ -89,7 +87,7 @@ class Which(NueFSSheaf):
 class Status(NueFSSheaf):
     """Show NueFS mount status."""
 
-    root: typing.Annotated[pathlib.Path | None, tyro.conf.Positional] = None
+    root: Annotated[pathlib.Path | None, sheaves.cli.Positional("Mount root directory (optional)", nargs="?")] = None
 
     def run(self) -> None:
         root = self.root.expanduser() if self.root is not None else None
@@ -105,4 +103,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

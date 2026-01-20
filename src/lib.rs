@@ -174,6 +174,34 @@ fn which_root(root: PathBuf, path: &str) -> PyResult<Option<OwnerInfo>> {
     }))
 }
 
+#[pyfunction]
+fn update(handle: &MountHandle, mounts: Vec<Mount>) -> PyResult<()> {
+    let mounts = mounts
+        .into_iter()
+        .map(|m| MountSpec {
+            target: m.target,
+            source: m.source,
+        })
+        .collect();
+
+    let client = Client::new();
+    client.update(handle.mount_id, mounts).map_err(to_pyerr)
+}
+
+#[pyfunction]
+fn get_manifest(handle: &MountHandle) -> PyResult<Vec<Mount>> {
+    let client = Client::new();
+    let mounts = client.get_manifest(handle.mount_id).map_err(to_pyerr)?;
+
+    Ok(mounts
+        .into_iter()
+        .map(|m| Mount {
+            target: m.target,
+            source: m.source,
+        })
+        .collect())
+}
+
 fn to_pyerr(err: crate::client::ClientError) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err.to_string())
 }
@@ -190,5 +218,7 @@ fn _nuefs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(status, m)?)?;
     m.add_function(wrap_pyfunction!(unmount_root, m)?)?;
     m.add_function(wrap_pyfunction!(which_root, m)?)?;
+    m.add_function(wrap_pyfunction!(update, m)?)?;
+    m.add_function(wrap_pyfunction!(get_manifest, m)?)?;
     Ok(())
 }

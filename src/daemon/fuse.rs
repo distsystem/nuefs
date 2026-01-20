@@ -21,7 +21,7 @@ const TTL: Duration = Duration::from_secs(1);
 /// FUSE layered filesystem.
 pub(crate) struct NueFs {
     real_root: PathBuf,
-    manifest: Arc<Manifest>,
+    manifest: Arc<RwLock<Manifest>>,
     inodes: RwLock<HashMap<u64, String>>,
     paths: RwLock<HashMap<String, u64>>,
     next_ino: AtomicU64,
@@ -30,7 +30,7 @@ pub(crate) struct NueFs {
 }
 
 impl NueFs {
-    pub(crate) fn new(real_root: PathBuf, manifest: Arc<Manifest>) -> Self {
+    pub(crate) fn new(real_root: PathBuf, manifest: Arc<RwLock<Manifest>>) -> Self {
         let mut inodes = HashMap::new();
         let mut paths = HashMap::new();
 
@@ -141,7 +141,7 @@ impl Filesystem for NueFs {
             format!("{parent_path}/{name}")
         };
 
-        let backend_path = match self.manifest.resolve(&child_path) {
+        let backend_path = match self.manifest.read().resolve(&child_path) {
             Some(p) => p,
             None => {
                 reply.error(libc::ENOENT);
@@ -189,7 +189,7 @@ impl Filesystem for NueFs {
             return;
         }
 
-        let backend_path = match self.manifest.resolve(&path) {
+        let backend_path = match self.manifest.read().resolve(&path) {
             Some(p) => p,
             None => {
                 reply.error(libc::ENOENT);
@@ -224,7 +224,7 @@ impl Filesystem for NueFs {
             (if path.is_empty() { 1 } else { ino }, FileType::Directory, "..".to_string()),
         ];
 
-        for (name, is_dir) in self.manifest.readdir(&path) {
+        for (name, is_dir) in self.manifest.read().readdir(&path) {
             let child_path = if path.is_empty() {
                 name.clone()
             } else {
@@ -257,7 +257,7 @@ impl Filesystem for NueFs {
             }
         };
 
-        let backend_path = match self.manifest.resolve(&path) {
+        let backend_path = match self.manifest.read().resolve(&path) {
             Some(p) => p,
             None => {
                 reply.error(libc::ENOENT);
@@ -383,7 +383,7 @@ impl Filesystem for NueFs {
             format!("{parent_path}/{name}")
         };
 
-        let target_dir = self.manifest.create_target(&parent_path);
+        let target_dir = self.manifest.read().create_target(&parent_path);
         let backend_path = target_dir.join(&*name);
 
         if let Some(parent) = backend_path.parent() {
@@ -433,7 +433,7 @@ impl Filesystem for NueFs {
             format!("{parent_path}/{name}")
         };
 
-        let backend_path = match self.manifest.resolve(&child_path) {
+        let backend_path = match self.manifest.read().resolve(&child_path) {
             Some(p) => p,
             None => {
                 reply.error(libc::ENOENT);
@@ -471,7 +471,7 @@ impl Filesystem for NueFs {
             format!("{parent_path}/{name}")
         };
 
-        let target_dir = self.manifest.create_target(&parent_path);
+        let target_dir = self.manifest.read().create_target(&parent_path);
         let backend_path = target_dir.join(&*name);
 
         match fs::create_dir(&backend_path) {
@@ -511,7 +511,7 @@ impl Filesystem for NueFs {
             format!("{parent_path}/{name}")
         };
 
-        let backend_path = match self.manifest.resolve(&child_path) {
+        let backend_path = match self.manifest.read().resolve(&child_path) {
             Some(p) => p,
             None => {
                 reply.error(libc::ENOENT);
@@ -566,7 +566,7 @@ impl Filesystem for NueFs {
             format!("{newparent_path}/{newname}")
         };
 
-        let old_backend = match self.manifest.resolve(&old_path) {
+        let old_backend = match self.manifest.read().resolve(&old_path) {
             Some(p) => p,
             None => {
                 reply.error(libc::ENOENT);
@@ -574,10 +574,10 @@ impl Filesystem for NueFs {
             }
         };
 
-        let new_backend = if let Some(p) = self.manifest.resolve(&new_path) {
+        let new_backend = if let Some(p) = self.manifest.read().resolve(&new_path) {
             p
         } else {
-            let target_dir = self.manifest.create_target(&newparent_path);
+            let target_dir = self.manifest.read().create_target(&newparent_path);
             target_dir.join(&*newname)
         };
 
@@ -616,7 +616,7 @@ impl Filesystem for NueFs {
         let backend_path = if path.is_empty() {
             self.real_root.clone()
         } else {
-            match self.manifest.resolve(&path) {
+            match self.manifest.read().resolve(&path) {
                 Some(p) => p,
                 None => {
                     reply.error(libc::ENOENT);
