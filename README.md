@@ -20,7 +20,7 @@ Named after [Nue (鵺)](https://en.wikipedia.org/wiki/Nue), a Japanese chimera w
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
 │  │ #[pyclass]  │    │ IPC Client  │    │ Auto-start  │     │
 │  │ Mapping     │    │ Unix Socket │    │ nuefsd      │     │
-│  │ RawHandle   │    │ serde_json  │    │ (if needed) │     │
+│  │ RawHandle   │    │ tarpc       │    │ (if needed) │     │
 │  └─────────────┘    └─────────────┘    └─────────────┘     │
 └─────────────────────────────────────────────────────────────┘
                               │ IPC (Unix Socket)

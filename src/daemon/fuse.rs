@@ -18,6 +18,42 @@ use super::manager::Manifest;
 
 const TTL: Duration = Duration::from_secs(1);
 
+fn io_errno(err: &std::io::Error) -> i32 {
+    err.raw_os_error().unwrap_or(libc::EIO)
+}
+
+fn join_child(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+macro_rules! option_or_reply {
+    ($opt:expr, $reply:expr, $errno:expr) => {
+        match $opt {
+            Some(v) => v,
+            None => {
+                $reply.error($errno);
+                return;
+            }
+        }
+    };
+}
+
+macro_rules! io_or_reply {
+    ($res:expr, $reply:expr) => {
+        match $res {
+            Ok(v) => v,
+            Err(e) => {
+                $reply.error(io_errno(&e));
+                return;
+            }
+        }
+    };
+}
+
 /// FUSE layered filesystem.
 pub(crate) struct NueFs {
     real_root: PathBuf,
@@ -126,45 +162,18 @@ impl NueFs {
 
 impl Filesystem for NueFs {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let parent_path = match self.get_path(parent) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
+        let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
-        let child_path = if parent_path.is_empty() {
-            name.to_string()
-        } else {
-            format!("{parent_path}/{name}")
-        };
-
-        let backend_path = match self.manifest.read().resolve(&child_path) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
+        let child_path = join_child(&parent_path, name.as_ref());
+        let backend_path =
+            option_or_reply!(self.manifest.read().resolve(&child_path), reply, libc::ENOENT);
         let ino = self.get_or_create_ino(&child_path);
-
-        match self.get_attr(ino, &backend_path) {
-            Some(attr) => reply.entry(&TTL, &attr, 0),
-            None => reply.error(libc::ENOENT),
-        }
+        let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::ENOENT);
+        reply.entry(&TTL, &attr, 0);
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        let path = match self.get_path(ino) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
+        let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
 
         if path.is_empty() {
             let now = SystemTime::now();
@@ -189,18 +198,9 @@ impl Filesystem for NueFs {
             return;
         }
 
-        let backend_path = match self.manifest.read().resolve(&path) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
-        match self.get_attr(ino, &backend_path) {
-            Some(attr) => reply.attr(&TTL, &attr),
-            None => reply.error(libc::ENOENT),
-        }
+        let backend_path = option_or_reply!(self.manifest.read().resolve(&path), reply, libc::ENOENT);
+        let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::ENOENT);
+        reply.attr(&TTL, &attr);
     }
 
     fn readdir(
@@ -211,13 +211,7 @@ impl Filesystem for NueFs {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let path = match self.get_path(ino) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
+        let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
 
         let mut entries = vec![
             (ino, FileType::Directory, ".".to_string()),
@@ -225,11 +219,7 @@ impl Filesystem for NueFs {
         ];
 
         for (name, is_dir) in self.manifest.read().readdir(&path) {
-            let child_path = if path.is_empty() {
-                name.clone()
-            } else {
-                format!("{path}/{name}")
-            };
+            let child_path = join_child(&path, &name);
             let child_ino = self.get_or_create_ino(&child_path);
             let kind = if is_dir {
                 FileType::Directory
@@ -249,33 +239,15 @@ impl Filesystem for NueFs {
     }
 
     fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
-        let path = match self.get_path(ino) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
-        let backend_path = match self.manifest.read().resolve(&path) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
-        let file = match OpenOptions::new()
+        let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
+        let backend_path = option_or_reply!(self.manifest.read().resolve(&path), reply, libc::ENOENT);
+        let file = io_or_reply!(
+            OpenOptions::new()
             .read(true)
             .write((flags & libc::O_WRONLY != 0) || (flags & libc::O_RDWR != 0))
-            .open(&backend_path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                return;
-            }
-        };
+            .open(&backend_path),
+            reply
+        );
 
         let fh = self.alloc_fh(file);
         reply.opened(fh, 0);
@@ -292,24 +264,12 @@ impl Filesystem for NueFs {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let mut file = match self.get_file(fh) {
-            Some(f) => f,
-            None => {
-                reply.error(libc::EBADF);
-                return;
-            }
-        };
-
-        if let Err(e) = file.seek(SeekFrom::Start(offset as u64)) {
-            reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-            return;
-        }
+        let mut file = option_or_reply!(self.get_file(fh), reply, libc::EBADF);
+        io_or_reply!(file.seek(SeekFrom::Start(offset as u64)), reply);
 
         let mut buf = vec![0u8; size as usize];
-        match file.read(&mut buf) {
-            Ok(n) => reply.data(&buf[..n]),
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
-        }
+        let n = io_or_reply!(file.read(&mut buf), reply);
+        reply.data(&buf[..n]);
     }
 
     fn write(
@@ -325,23 +285,10 @@ impl Filesystem for NueFs {
         reply: ReplyWrite,
     ) {
         let mut handles = self.handles.write();
-        let file = match handles.get_mut(&fh) {
-            Some(f) => f,
-            None => {
-                reply.error(libc::EBADF);
-                return;
-            }
-        };
-
-        if let Err(e) = file.seek(SeekFrom::Start(offset as u64)) {
-            reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-            return;
-        }
-
-        match file.write(data) {
-            Ok(n) => reply.written(n as u32),
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
-        }
+        let file = option_or_reply!(handles.get_mut(&fh), reply, libc::EBADF);
+        io_or_reply!(file.seek(SeekFrom::Start(offset as u64)), reply);
+        let n = io_or_reply!(file.write(data), reply);
+        reply.written(n as u32);
     }
 
     fn release(
@@ -368,83 +315,42 @@ impl Filesystem for NueFs {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        let parent_path = match self.get_path(parent) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
+        let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
-        let child_path = if parent_path.is_empty() {
-            name.to_string()
-        } else {
-            format!("{parent_path}/{name}")
-        };
-
+        let child_path = join_child(&parent_path, name.as_ref());
         let target_dir = self.manifest.read().create_target(&parent_path);
         let backend_path = target_dir.join(&*name);
 
         if let Some(parent) = backend_path.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                return;
-            }
+            io_or_reply!(fs::create_dir_all(parent), reply);
         }
 
-        let file = match OpenOptions::new()
+        let file = io_or_reply!(
+            OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(flags & libc::O_TRUNC != 0)
             .mode(mode)
-            .open(&backend_path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                return;
-            }
-        };
+            .open(&backend_path),
+            reply
+        );
 
         let ino = self.get_or_create_ino(&child_path);
         let fh = self.alloc_fh(file);
 
-        match self.get_attr(ino, &backend_path) {
-            Some(attr) => reply.created(&TTL, &attr, 0, fh, 0),
-            None => reply.error(libc::EIO),
-        }
+        let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::EIO);
+        reply.created(&TTL, &attr, 0, fh, 0);
     }
 
     fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let parent_path = match self.get_path(parent) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
+        let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
-        let child_path = if parent_path.is_empty() {
-            name.to_string()
-        } else {
-            format!("{parent_path}/{name}")
-        };
-
-        let backend_path = match self.manifest.read().resolve(&child_path) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
-        match fs::remove_file(&backend_path) {
-            Ok(()) => reply.ok(),
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
-        }
+        let child_path = join_child(&parent_path, name.as_ref());
+        let backend_path =
+            option_or_reply!(self.manifest.read().resolve(&child_path), reply, libc::ENOENT);
+        io_or_reply!(fs::remove_file(&backend_path), reply);
+        reply.ok();
     }
 
     fn mkdir(
@@ -456,73 +362,31 @@ impl Filesystem for NueFs {
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        let parent_path = match self.get_path(parent) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
+        let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
-        let child_path = if parent_path.is_empty() {
-            name.to_string()
-        } else {
-            format!("{parent_path}/{name}")
-        };
-
+        let child_path = join_child(&parent_path, name.as_ref());
         let target_dir = self.manifest.read().create_target(&parent_path);
         let backend_path = target_dir.join(&*name);
 
-        match fs::create_dir(&backend_path) {
-            Ok(()) => {
-                if let Err(e) = fs::set_permissions(&backend_path, fs::Permissions::from_mode(mode))
-                {
-                    eprintln!("Warning: failed to set permissions: {e}");
-                }
-            }
-            Err(e) => {
-                reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                return;
-            }
+        io_or_reply!(fs::create_dir(&backend_path), reply);
+        if let Err(e) = fs::set_permissions(&backend_path, fs::Permissions::from_mode(mode)) {
+            eprintln!("Warning: failed to set permissions: {e}");
         }
 
         let ino = self.get_or_create_ino(&child_path);
 
-        match self.get_attr(ino, &backend_path) {
-            Some(attr) => reply.entry(&TTL, &attr, 0),
-            None => reply.error(libc::EIO),
-        }
+        let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::EIO);
+        reply.entry(&TTL, &attr, 0);
     }
 
     fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let parent_path = match self.get_path(parent) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
+        let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
-        let child_path = if parent_path.is_empty() {
-            name.to_string()
-        } else {
-            format!("{parent_path}/{name}")
-        };
-
-        let backend_path = match self.manifest.read().resolve(&child_path) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
-        match fs::remove_dir(&backend_path) {
-            Ok(()) => reply.ok(),
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
-        }
+        let child_path = join_child(&parent_path, name.as_ref());
+        let backend_path =
+            option_or_reply!(self.manifest.read().resolve(&child_path), reply, libc::ENOENT);
+        io_or_reply!(fs::remove_dir(&backend_path), reply);
+        reply.ok();
     }
 
     fn rename(
@@ -535,56 +399,27 @@ impl Filesystem for NueFs {
         _flags: u32,
         reply: ReplyEmpty,
     ) {
-        let parent_path = match self.get_path(parent) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
-
-        let newparent_path = match self.get_path(newparent) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
+        let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
+        let newparent_path = option_or_reply!(self.get_path(newparent), reply, libc::ENOENT);
 
         let name = name.to_string_lossy();
         let newname = newname.to_string_lossy();
 
-        let old_path = if parent_path.is_empty() {
-            name.to_string()
-        } else {
-            format!("{parent_path}/{name}")
-        };
+        let old_path = join_child(&parent_path, name.as_ref());
+        let new_path = join_child(&newparent_path, newname.as_ref());
 
-        let new_path = if newparent_path.is_empty() {
-            newname.to_string()
-        } else {
-            format!("{newparent_path}/{newname}")
-        };
-
-        let old_backend = match self.manifest.read().resolve(&old_path) {
+        let manifest = self.manifest.read();
+        let old_backend = option_or_reply!(manifest.resolve(&old_path), reply, libc::ENOENT);
+        let new_backend = match manifest.resolve(&new_path) {
             Some(p) => p,
             None => {
-                reply.error(libc::ENOENT);
-                return;
+                let target_dir = manifest.create_target(&newparent_path);
+                target_dir.join(newname.as_ref())
             }
         };
 
-        let new_backend = if let Some(p) = self.manifest.read().resolve(&new_path) {
-            p
-        } else {
-            let target_dir = self.manifest.read().create_target(&newparent_path);
-            target_dir.join(&*newname)
-        };
-
-        match fs::rename(&old_backend, &new_backend) {
-            Ok(()) => reply.ok(),
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
-        }
+        io_or_reply!(fs::rename(&old_backend, &new_backend), reply);
+        reply.ok();
     }
 
     fn setattr(
@@ -605,54 +440,36 @@ impl Filesystem for NueFs {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        let path = match self.get_path(ino) {
-            Some(p) => p,
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
-        };
+        let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
 
         let backend_path = if path.is_empty() {
             self.real_root.clone()
         } else {
-            match self.manifest.read().resolve(&path) {
-                Some(p) => p,
-                None => {
-                    reply.error(libc::ENOENT);
-                    return;
-                }
-            }
+            option_or_reply!(self.manifest.read().resolve(&path), reply, libc::ENOENT)
         };
 
         if let Some(size) = size {
             if let Some(fh) = fh {
                 if let Some(file) = self.get_file(fh) {
-                    if let Err(e) = file.set_len(size) {
-                        reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                        return;
-                    }
+                    io_or_reply!(file.set_len(size), reply);
                 }
-            } else if let Err(e) = fs::File::open(&backend_path).and_then(|f| f.set_len(size)) {
-                reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                return;
+            } else {
+                io_or_reply!(fs::File::open(&backend_path).and_then(|f| f.set_len(size)), reply);
             }
         }
 
         if let Some(mode) = mode {
-            if let Err(e) = fs::set_permissions(&backend_path, fs::Permissions::from_mode(mode)) {
-                reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                return;
-            }
+            io_or_reply!(
+                fs::set_permissions(&backend_path, fs::Permissions::from_mode(mode)),
+                reply
+            );
         }
 
         if uid.is_some() || gid.is_some() {
             // Skip chown for now - requires unsafe and root.
         }
 
-        match self.get_attr(ino, &backend_path) {
-            Some(attr) => reply.attr(&TTL, &attr),
-            None => reply.error(libc::EIO),
-        }
+        let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::EIO);
+        reply.attr(&TTL, &attr);
     }
 }

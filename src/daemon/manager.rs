@@ -7,7 +7,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use thiserror::Error;
 
-use crate::types::{MountSpec, MountStatus, OwnerInfoWire, Request, Response, ResponseData};
+use crate::types::{MountSpec, MountStatus, OwnerInfoWire};
 
 use super::fuse::NueFs;
 
@@ -52,38 +52,7 @@ impl Manager {
         }
     }
 
-    pub fn handle(&mut self, request: Request) -> Response {
-        let result = match request {
-            Request::Mount { root, mounts } => self
-                .mount(root, mounts)
-                .map(|mount_id| ResponseData::Mounted { mount_id }),
-            Request::Unmount { mount_id } => self.unmount(mount_id).map(|()| ResponseData::Unmounted),
-            Request::Which { mount_id, path } => self
-                .which(mount_id, &path)
-                .map(|info| ResponseData::Which { info }),
-            Request::Status => Ok(ResponseData::Status {
-                mounts: self.status(),
-            }),
-            Request::Resolve { root } => self
-                .resolve(root)
-                .map(|mount_id| ResponseData::Resolved { mount_id }),
-            Request::Update { mount_id, mounts } => {
-                self.update(mount_id, mounts).map(|()| ResponseData::Updated)
-            }
-            Request::GetManifest { mount_id } => self
-                .get_manifest(mount_id)
-                .map(|mounts| ResponseData::Manifest { mounts }),
-        };
-
-        match result {
-            Ok(data) => Response::Ok { data },
-            Err(e) => Response::Err {
-                message: e.to_string(),
-            },
-        }
-    }
-
-    fn mount(&mut self, root: PathBuf, mounts: Vec<MountSpec>) -> Result<u64, ManagerError> {
+    pub fn mount(&mut self, root: PathBuf, mounts: Vec<MountSpec>) -> Result<u64, ManagerError> {
         let root = root
             .canonicalize()
             .map_err(|e| ManagerError::InvalidRoot(e.to_string()))?;
@@ -119,7 +88,7 @@ impl Manager {
         Ok(mount_id)
     }
 
-    fn unmount(&mut self, mount_id: u64) -> Result<(), ManagerError> {
+    pub fn unmount(&mut self, mount_id: u64) -> Result<(), ManagerError> {
         let mut session = self
             .mounts
             .remove(&mount_id)
@@ -134,7 +103,7 @@ impl Manager {
         Ok(())
     }
 
-    fn which(&self, mount_id: u64, path: &str) -> Result<Option<OwnerInfoWire>, ManagerError> {
+    pub fn which(&self, mount_id: u64, path: &str) -> Result<Option<OwnerInfoWire>, ManagerError> {
         let session = self
             .mounts
             .get(&mount_id)
@@ -142,7 +111,7 @@ impl Manager {
         Ok(session.manifest.read().which(path))
     }
 
-    fn status(&self) -> Vec<MountStatus> {
+    pub fn status(&self) -> Vec<MountStatus> {
         let mut mounts: Vec<MountStatus> = self
             .mounts
             .iter()
@@ -155,14 +124,14 @@ impl Manager {
         mounts
     }
 
-    fn resolve(&self, root: PathBuf) -> Result<Option<u64>, ManagerError> {
+    pub fn resolve(&self, root: PathBuf) -> Result<Option<u64>, ManagerError> {
         let Ok(root) = root.canonicalize() else {
             return Ok(None);
         };
         Ok(self.mounts_by_root.get(&root).copied())
     }
 
-    fn update(&mut self, mount_id: u64, new_mounts: Vec<MountSpec>) -> Result<(), ManagerError> {
+    pub fn update(&mut self, mount_id: u64, new_mounts: Vec<MountSpec>) -> Result<(), ManagerError> {
         let session = self
             .mounts
             .get_mut(&mount_id)
@@ -177,7 +146,7 @@ impl Manager {
         Ok(())
     }
 
-    fn get_manifest(&self, mount_id: u64) -> Result<Vec<MountSpec>, ManagerError> {
+    pub fn get_manifest(&self, mount_id: u64) -> Result<Vec<MountSpec>, ManagerError> {
         let session = self
             .mounts
             .get(&mount_id)
@@ -235,8 +204,14 @@ impl Manifest {
             return Ok(());
         }
 
-        for entry in fs::read_dir(dir).map_err(|e| ManifestError::Io(dir.to_path_buf(), e))? {
-            let entry = entry.map_err(|e| ManifestError::Io(dir.to_path_buf(), e))?;
+        for entry in fs::read_dir(dir).map_err(|e| ManifestError::Io {
+            path: dir.to_path_buf(),
+            source: e,
+        })? {
+            let entry = entry.map_err(|e| ManifestError::Io {
+                path: dir.to_path_buf(),
+                source: e,
+            })?;
             let name = entry.file_name().to_string_lossy().to_string();
             let rel_path = if prefix.is_empty() {
                 name.clone()
@@ -246,7 +221,10 @@ impl Manifest {
 
             let metadata = entry
                 .metadata()
-                .map_err(|e| ManifestError::Io(entry.path(), e))?;
+                .map_err(|e| ManifestError::Io {
+                    path: entry.path(),
+                    source: e,
+                })?;
             let is_dir = metadata.is_dir();
 
             on_entry(self, &rel_path, &entry.path(), is_dir)?;
@@ -382,17 +360,8 @@ impl Manifest {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ManifestError {
-    Io(PathBuf, std::io::Error),
+    #[error("IO error at {path}: {source}")]
+    Io { path: PathBuf, source: std::io::Error },
 }
-
-impl std::fmt::Display for ManifestError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ManifestError::Io(path, e) => write!(f, "IO error at {}: {}", path.display(), e),
-        }
-    }
-}
-
-impl std::error::Error for ManifestError {}

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
     let mut socket: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
 
@@ -22,7 +23,7 @@ fn main() {
     }
 
     let socket = socket.unwrap_or_else(_nuefs::runtime::default_socket_path);
-    if let Err(e) = _nuefs::daemon::server::serve(socket) {
+    if let Err(e) = _nuefs::daemon::server::serve(socket).await {
         eprintln!("nuefsd: fatal error: {e}");
         std::process::exit(1);
     }

@@ -1,13 +1,15 @@
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+use tarpc::client;
+use tarpc::serde_transport;
+use tarpc::tokio_serde::formats::Bincode;
 use thiserror::Error;
 
-use crate::types::{MountSpec, MountStatus, OwnerInfoWire, Request, Response, ResponseData};
+use crate::types::{MountSpec, MountStatus, NuefsServiceClient, OwnerInfoWire};
 
 const BIN_ENV: &str = "NUEFSD_BIN";
 
@@ -22,156 +24,114 @@ pub enum ClientError {
     #[error("daemon returned an error: {0}")]
     Daemon(String),
 
-    #[error("failed to decode daemon response: {0}")]
-    Decode(serde_json::Error),
-
-    #[error("invalid daemon response: {0}")]
-    InvalidResponse(String),
+    #[error("rpc error: {0}")]
+    Rpc(#[from] tarpc::client::RpcError),
 
     #[error("io error: {0}")]
-    Io(std::io::Error),
+    Io(#[from] std::io::Error),
 }
 
 pub struct Client {
-    socket_path: PathBuf,
-    daemon_bin: String,
+    rt: tokio::runtime::Runtime,
+    inner: NuefsServiceClient,
 }
 
 impl Client {
-    pub fn new() -> Self {
-        Self {
-            socket_path: crate::runtime::default_socket_path(),
-            daemon_bin: std::env::var(BIN_ENV).unwrap_or_else(|_| "nuefsd".to_string()),
-        }
+    pub fn new() -> Result<Self, ClientError> {
+        let socket_path = crate::runtime::default_socket_path();
+        let daemon_bin = std::env::var(BIN_ENV).unwrap_or_else(|_| "nuefsd".to_string());
+
+        ensure_daemon(&socket_path, &daemon_bin)?;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        let inner = rt.block_on(async {
+            let transport =
+                serde_transport::unix::connect(&socket_path, Bincode::default)
+                    .await
+                    .map_err(|e| ClientError::Connect {
+                        socket: socket_path.clone(),
+                        source: e,
+                    })?;
+            Ok::<_, ClientError>(NuefsServiceClient::new(client::Config::default(), transport).spawn())
+        })?;
+
+        Ok(Self { rt, inner })
+    }
+
+    fn call<T, Fut>(&self, f: impl FnOnce(tarpc::context::Context) -> Fut) -> Result<T, ClientError>
+    where
+        Fut: std::future::Future<Output = Result<T, tarpc::client::RpcError>>,
+    {
+        self.rt.block_on(async { Ok::<_, ClientError>(f(tarpc::context::current()).await?) })
+    }
+
+    fn call_daemon<T, Fut>(
+        &self,
+        f: impl FnOnce(tarpc::context::Context) -> Fut,
+    ) -> Result<T, ClientError>
+    where
+        Fut: std::future::Future<Output = Result<Result<T, String>, tarpc::client::RpcError>>,
+    {
+        self.call(f)?.map_err(ClientError::Daemon)
     }
 
     pub fn mount(&self, root: PathBuf, mounts: Vec<MountSpec>) -> Result<u64, ClientError> {
-        let response = self.request(&Request::Mount { root, mounts })?;
-        match response {
-            Response::Ok {
-                data: ResponseData::Mounted { mount_id },
-            } => Ok(mount_id),
-            other => Err(ClientError::InvalidResponse(format!("{other:?}"))),
-        }
+        self.call_daemon(|ctx| self.inner.mount(ctx, root, mounts))
     }
 
     pub fn unmount(&self, mount_id: u64) -> Result<(), ClientError> {
-        let response = self.request(&Request::Unmount { mount_id })?;
-        match response {
-            Response::Ok {
-                data: ResponseData::Unmounted,
-            } => Ok(()),
-            other => Err(ClientError::InvalidResponse(format!("{other:?}"))),
-        }
+        self.call_daemon(|ctx| self.inner.unmount(ctx, mount_id))
     }
 
     pub fn which(&self, mount_id: u64, path: String) -> Result<Option<OwnerInfoWire>, ClientError> {
-        let response = self.request(&Request::Which { mount_id, path })?;
-        match response {
-            Response::Ok {
-                data: ResponseData::Which { info },
-            } => Ok(info),
-            other => Err(ClientError::InvalidResponse(format!("{other:?}"))),
-        }
+        self.call_daemon(|ctx| self.inner.which(ctx, mount_id, path))
     }
 
     pub fn status(&self) -> Result<Vec<MountStatus>, ClientError> {
-        let response = self.request(&Request::Status)?;
-        match response {
-            Response::Ok {
-                data: ResponseData::Status { mounts },
-            } => Ok(mounts),
-            other => Err(ClientError::InvalidResponse(format!("{other:?}"))),
-        }
+        self.call(|ctx| self.inner.status(ctx))
     }
 
     pub fn update(&self, mount_id: u64, mounts: Vec<MountSpec>) -> Result<(), ClientError> {
-        let response = self.request(&Request::Update { mount_id, mounts })?;
-        match response {
-            Response::Ok {
-                data: ResponseData::Updated,
-            } => Ok(()),
-            other => Err(ClientError::InvalidResponse(format!("{other:?}"))),
-        }
+        self.call_daemon(|ctx| self.inner.update(ctx, mount_id, mounts))
     }
 
     pub fn get_manifest(&self, mount_id: u64) -> Result<Vec<MountSpec>, ClientError> {
-        let response = self.request(&Request::GetManifest { mount_id })?;
-        match response {
-            Response::Ok {
-                data: ResponseData::Manifest { mounts },
-            } => Ok(mounts),
-            other => Err(ClientError::InvalidResponse(format!("{other:?}"))),
-        }
+        self.call_daemon(|ctx| self.inner.get_manifest(ctx, mount_id))
     }
 
     pub fn resolve(&self, root: PathBuf) -> Result<Option<u64>, ClientError> {
-        let response = self.request(&Request::Resolve { root })?;
-        match response {
-            Response::Ok {
-                data: ResponseData::Resolved { mount_id },
-            } => Ok(mount_id),
-            other => Err(ClientError::InvalidResponse(format!("{other:?}"))),
-        }
+        self.call(|ctx| self.inner.resolve(ctx, root))
+    }
+}
+
+fn ensure_daemon(socket_path: &PathBuf, daemon_bin: &str) -> Result<(), ClientError> {
+    if StdUnixStream::connect(socket_path).is_ok() {
+        return Ok(());
     }
 
-    fn request(&self, request: &Request) -> Result<Response, ClientError> {
-        self.ensure_daemon()?;
+    spawn_daemon(daemon_bin, socket_path)?;
 
-        let mut stream = UnixStream::connect(&self.socket_path)
-            .map_err(|e| ClientError::Connect {
-                socket: self.socket_path.clone(),
-                source: e,
-            })?;
-
-        let json = serde_json::to_vec(request).map_err(ClientError::Decode)?;
-        stream.write_all(&json).map_err(ClientError::Io)?;
-        stream.write_all(b"\n").map_err(ClientError::Io)?;
-        stream.flush().map_err(ClientError::Io)?;
-
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader.read_line(&mut line).map_err(ClientError::Io)?;
-        let response: Response = serde_json::from_str(&line).map_err(ClientError::Decode)?;
-
-        match response {
-            Response::Ok { .. } => Ok(response),
-            Response::Err { message } => Err(ClientError::Daemon(message)),
-        }
-    }
-
-    fn ensure_daemon(&self) -> Result<(), ClientError> {
-        if UnixStream::connect(&self.socket_path).is_ok() {
+    for _ in 0..40 {
+        if StdUnixStream::connect(socket_path).is_ok() {
             return Ok(());
         }
-
-        if let Err(e) = spawn_daemon(&self.daemon_bin, &self.socket_path) {
-            return Err(ClientError::Spawn(e));
-        }
-
-        for _ in 0..40 {
-            if UnixStream::connect(&self.socket_path).is_ok() {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-
-        Err(ClientError::Connect {
-            socket: self.socket_path.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::TimedOut, "daemon did not become ready"),
-        })
+        thread::sleep(Duration::from_millis(50));
     }
+
+    Err(ClientError::Connect {
+        socket: socket_path.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::TimedOut, "daemon did not become ready"),
+    })
 }
 
-fn spawn_daemon(daemon_bin: &str, socket_path: &PathBuf) -> Result<(), std::io::Error> {
-    try_spawn_daemon_bin(daemon_bin, socket_path)
-}
-
-fn try_spawn_daemon_bin(daemon_bin: &str, socket_path: &PathBuf) -> Result<(), std::io::Error> {
+fn spawn_daemon(daemon_bin: &str, socket_path: &PathBuf) -> Result<(), ClientError> {
     let mut cmd = Command::new(daemon_bin);
     cmd.arg("--socket").arg(socket_path);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    cmd.spawn().map(|_| ())
+    cmd.spawn().map(|_| ()).map_err(ClientError::Spawn)
 }

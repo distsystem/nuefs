@@ -1,14 +1,18 @@
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use futures::prelude::*;
+use tarpc::serde_transport;
+use tarpc::server::incoming;
+use tarpc::server::incoming::Incoming;
+use tarpc::server;
+use tarpc::tokio_serde::formats::Bincode;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
-use crate::types::{Request, Response};
+use crate::types::{MountSpec, MountStatus, NuefsService, OwnerInfoWire};
 
-use super::manager::Manager;
+use super::manager::{Manager, ManagerError};
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -19,59 +23,90 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
 }
 
-pub fn serve(socket_path: PathBuf) -> Result<(), ServerError> {
-    let _ = std::fs::remove_file(&socket_path);
+#[derive(Clone)]
+struct NuefsServer {
+    manager: Arc<Mutex<Manager>>,
+}
 
-    let listener = UnixListener::bind(&socket_path).map_err(|e| ServerError::Bind {
-        socket: socket_path.clone(),
-        source: e,
-    })?;
+impl NuefsServer {
+    async fn manager_call<T>(
+        &self,
+        f: impl FnOnce(&mut Manager) -> Result<T, ManagerError>,
+    ) -> Result<T, String> {
+        let mut manager = self.manager.lock().await;
+        f(&mut manager).map_err(|e| e.to_string())
+    }
+}
 
-    let manager = Arc::new(Mutex::new(Manager::new()));
-
-    for stream in listener.incoming() {
-        let stream = match stream {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("nuefsd: accept error: {e}");
-                continue;
-            }
-        };
-
-        let manager = manager.clone();
-        std::thread::spawn(move || {
-            if let Err(e) = handle_connection(stream, manager) {
-                eprintln!("nuefsd: connection error: {e}");
-            }
-        });
+impl NuefsService for NuefsServer {
+    async fn mount(
+        self,
+        _: tarpc::context::Context,
+        root: PathBuf,
+        mounts: Vec<MountSpec>,
+    ) -> Result<u64, String> {
+        self.manager_call(|m| m.mount(root, mounts)).await
     }
 
-    Ok(())
+    async fn unmount(self, _: tarpc::context::Context, mount_id: u64) -> Result<(), String> {
+        self.manager_call(|m| m.unmount(mount_id)).await
+    }
+
+    async fn which(
+        self,
+        _: tarpc::context::Context,
+        mount_id: u64,
+        path: String,
+    ) -> Result<Option<OwnerInfoWire>, String> {
+        self.manager_call(|m| m.which(mount_id, &path)).await
+    }
+
+    async fn status(self, _: tarpc::context::Context) -> Vec<MountStatus> {
+        self.manager.lock().await.status()
+    }
+
+    async fn update(
+        self,
+        _: tarpc::context::Context,
+        mount_id: u64,
+        mounts: Vec<MountSpec>,
+    ) -> Result<(), String> {
+        self.manager_call(|m| m.update(mount_id, mounts)).await
+    }
+
+    async fn get_manifest(
+        self,
+        _: tarpc::context::Context,
+        mount_id: u64,
+    ) -> Result<Vec<MountSpec>, String> {
+        self.manager_call(|m| m.get_manifest(mount_id)).await
+    }
+
+    async fn resolve(self, _: tarpc::context::Context, root: PathBuf) -> Option<u64> {
+        self.manager_call(|m| m.resolve(root)).await.ok().flatten()
+    }
 }
 
-fn handle_connection(mut stream: UnixStream, manager: Arc<Mutex<Manager>>) -> Result<(), std::io::Error> {
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
+pub async fn serve(socket_path: PathBuf) -> Result<(), ServerError> {
+    let _ = std::fs::remove_file(&socket_path);
 
-    let request: Result<Request, _> = serde_json::from_str(&line);
-    let response: Response = match request {
-        Ok(req) => manager.lock().handle(req),
-        Err(e) => Response::Err {
-            message: format!("invalid request: {e}"),
-        },
+    let server = NuefsServer {
+        manager: Arc::new(Mutex::new(Manager::new())),
     };
 
-    let json = serde_json::to_vec(&response).unwrap_or_else(|e| {
-        serde_json::to_vec(&Response::Err {
-            message: format!("failed to encode response: {e}"),
-        })
-        .unwrap_or_else(|_| b"{\"status\":\"err\",\"message\":\"encode failure\"}".to_vec())
-    });
+    let listener =
+        serde_transport::unix::listen(&socket_path, Bincode::default)
+            .await
+            .map_err(|e| ServerError::Bind {
+                socket: socket_path.clone(),
+                source: e,
+            })?;
 
-    stream.write_all(&json)?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
+    let incoming = listener
+        .filter_map(|result| async move { result.ok() })
+        .map(server::BaseChannel::with_defaults)
+        .execute(server.serve());
+    incoming::spawn_incoming(incoming).await;
+
     Ok(())
 }
-

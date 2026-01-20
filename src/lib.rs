@@ -86,7 +86,7 @@ fn _mount(root: PathBuf, mounts: Vec<Mapping>) -> PyResult<RawHandle> {
 
     let mounts: Vec<MountSpec> = mounts.into_iter().map(Into::into).collect();
 
-    let client = Client::new();
+    let client = Client::new().map_err(to_pyerr)?;
     let mount_id = client.mount(root.clone(), mounts).map_err(to_pyerr)?;
 
     Ok(RawHandle { root, mount_id })
@@ -96,7 +96,7 @@ fn _mount(root: PathBuf, mounts: Vec<Mapping>) -> PyResult<RawHandle> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn _unmount(mount_id: u64) -> PyResult<()> {
-    let client = Client::new();
+    let client = Client::new().map_err(to_pyerr)?;
     client.unmount(mount_id).map_err(to_pyerr)
 }
 
@@ -104,7 +104,7 @@ fn _unmount(mount_id: u64) -> PyResult<()> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn _status() -> PyResult<Vec<RawHandle>> {
-    let client = Client::new();
+    let client = Client::new().map_err(to_pyerr)?;
     let mounts = client.status().map_err(to_pyerr)?;
     Ok(mounts
         .into_iter()
@@ -119,7 +119,7 @@ fn _status() -> PyResult<Vec<RawHandle>> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn _which(mount_id: u64, path: String) -> PyResult<Option<OwnerInfo>> {
-    let client = Client::new();
+    let client = Client::new().map_err(to_pyerr)?;
     let info = client.which(mount_id, path).map_err(to_pyerr)?;
     Ok(info.map(|info| OwnerInfo {
         owner: info.owner,
@@ -133,7 +133,7 @@ fn _which(mount_id: u64, path: String) -> PyResult<Option<OwnerInfo>> {
 fn _update(mount_id: u64, mounts: Vec<Mapping>) -> PyResult<()> {
     let mounts: Vec<MountSpec> = mounts.into_iter().map(Into::into).collect();
 
-    let client = Client::new();
+    let client = Client::new().map_err(to_pyerr)?;
     client.update(mount_id, mounts).map_err(to_pyerr)
 }
 
@@ -141,7 +141,7 @@ fn _update(mount_id: u64, mounts: Vec<Mapping>) -> PyResult<()> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn _resolve(root: PathBuf) -> PyResult<Option<u64>> {
-    let client = Client::new();
+    let client = Client::new().map_err(to_pyerr)?;
     client.resolve(root).map_err(to_pyerr)
 }
 
@@ -149,7 +149,7 @@ fn _resolve(root: PathBuf) -> PyResult<Option<u64>> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn _get_manifest(mount_id: u64) -> PyResult<Vec<Mapping>> {
-    let client = Client::new();
+    let client = Client::new().map_err(to_pyerr)?;
     let mounts = client.get_manifest(mount_id).map_err(to_pyerr)?;
 
     Ok(mounts.into_iter().map(Into::into).collect())
