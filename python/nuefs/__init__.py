@@ -2,7 +2,7 @@
 
 import nuefs._nuefs as _ext
 
-type Mount = _ext.Mount
+type Mapping = _ext.Mapping
 type MountHandle = _ext.MountHandle
 type MountStatus = _ext.MountStatus
 type OwnerInfo = _ext.OwnerInfo
@@ -17,7 +17,7 @@ which = _ext.which
 which_root = _ext.which_root
 
 __all__ = [
-    "Mount",
+    "Mapping",
     "MountHandle",
     "MountStatus",
     "OwnerInfo",

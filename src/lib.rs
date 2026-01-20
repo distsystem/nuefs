@@ -9,20 +9,20 @@ use pyo3::prelude::*;
 use crate::client::Client;
 use crate::types::MountSpec;
 
-/// Single mount configuration: layer source -> target path.
+/// Single path mapping: source directory -> target path within mount root.
 #[pyclass]
 #[derive(Clone, Debug)]
-pub struct Mount {
+pub struct Mapping {
     /// Relative path within the mount root (e.g., ".config/nvim").
     #[pyo3(get, set)]
     pub target: PathBuf,
-    /// Absolute path to layer source directory.
+    /// Absolute path to source directory.
     #[pyo3(get, set)]
     pub source: PathBuf,
 }
 
 #[pymethods]
-impl Mount {
+impl Mapping {
     #[new]
     fn new(target: PathBuf, source: PathBuf) -> Self {
         Self { target, source }
@@ -68,7 +68,7 @@ pub struct MountStatus {
 }
 
 #[pyfunction]
-fn mount(root: PathBuf, mounts: Vec<Mount>) -> PyResult<MountHandle> {
+fn mount(root: PathBuf, mounts: Vec<Mapping>) -> PyResult<MountHandle> {
     let root = root.canonicalize().map_err(|e| {
         PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Invalid root path: {e}"))
     })?;
@@ -175,7 +175,7 @@ fn which_root(root: PathBuf, path: &str) -> PyResult<Option<OwnerInfo>> {
 }
 
 #[pyfunction]
-fn update(handle: &MountHandle, mounts: Vec<Mount>) -> PyResult<()> {
+fn update(handle: &MountHandle, mounts: Vec<Mapping>) -> PyResult<()> {
     let mounts = mounts
         .into_iter()
         .map(|m| MountSpec {
@@ -189,13 +189,13 @@ fn update(handle: &MountHandle, mounts: Vec<Mount>) -> PyResult<()> {
 }
 
 #[pyfunction]
-fn get_manifest(handle: &MountHandle) -> PyResult<Vec<Mount>> {
+fn get_manifest(handle: &MountHandle) -> PyResult<Vec<Mapping>> {
     let client = Client::new();
     let mounts = client.get_manifest(handle.mount_id).map_err(to_pyerr)?;
 
     Ok(mounts
         .into_iter()
-        .map(|m| Mount {
+        .map(|m| Mapping {
             target: m.target,
             source: m.source,
         })
@@ -208,7 +208,7 @@ fn to_pyerr(err: crate::client::ClientError) -> PyErr {
 
 #[pymodule]
 fn _nuefs(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<Mount>()?;
+    m.add_class::<Mapping>()?;
     m.add_class::<MountHandle>()?;
     m.add_class::<OwnerInfo>()?;
     m.add_class::<MountStatus>()?;
