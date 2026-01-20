@@ -9,9 +9,20 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
+pyo3-stub-gen = "0.7"
 fuser = "0.15"
 libc = "0.2"
 thiserror = "2"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[[bin]]
+name = "nuefsd"
+
+[[bin]]
+name = "stub_gen"
+required-features = ["stub"]
+
+[features]
+stub = []

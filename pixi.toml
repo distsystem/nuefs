@@ -32,7 +32,7 @@ CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=$CONDA_PREFIX/x86
 
 [feature.build.tasks]
 build = "maturin build --release"
-develop = "maturin develop --uv && cargo build --bin nuefsd && install -m 755 target/debug/nuefsd $CONDA_PREFIX/bin/nuefsd"
+develop = "maturin develop --uv && cargo install --path . --root $CONDA_PREFIX --force && cargo run --bin stub_gen --features stub"
 
 [environments]
 build = ["build"]

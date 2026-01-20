@@ -5,11 +5,16 @@ mod types;
 use std::path::PathBuf;
 
 use pyo3::prelude::*;
+use pyo3_stub_gen::define_stub_info_gatherer;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
 use crate::client::Client;
 use crate::types::MountSpec;
 
+define_stub_info_gatherer!(stub_info);
+
 /// Single path mapping: source directory -> target path within mount root.
+#[gen_stub_pyclass]
 #[pyclass]
 #[derive(Clone, Debug)]
 pub struct Mapping {
@@ -21,6 +26,7 @@ pub struct Mapping {
     pub source: PathBuf,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl Mapping {
     #[new]
@@ -30,6 +36,7 @@ impl Mapping {
 }
 
 /// Information about which backend owns a path.
+#[gen_stub_pyclass]
 #[pyclass]
 #[derive(Clone, Debug)]
 pub struct OwnerInfo {
@@ -40,6 +47,7 @@ pub struct OwnerInfo {
 }
 
 /// Handle to a mounted NueFS filesystem.
+#[gen_stub_pyclass]
 #[pyclass]
 #[derive(Clone, Debug)]
 pub struct MountHandle {
@@ -48,6 +56,7 @@ pub struct MountHandle {
     mount_id: u64,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl MountHandle {
     /// Check if the mount is still tracked by the daemon.
@@ -58,6 +67,7 @@ impl MountHandle {
     }
 }
 
+#[gen_stub_pyclass]
 #[pyclass]
 #[derive(Clone, Debug)]
 pub struct MountStatus {
@@ -67,6 +77,7 @@ pub struct MountStatus {
     pub root: PathBuf,
 }
 
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn mount(root: PathBuf, mounts: Vec<Mapping>) -> PyResult<MountHandle> {
     let root = root.canonicalize().map_err(|e| {
@@ -87,6 +98,7 @@ fn mount(root: PathBuf, mounts: Vec<Mapping>) -> PyResult<MountHandle> {
     Ok(MountHandle { root, mount_id })
 }
 
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn unmount(handle: &MountHandle) -> PyResult<()> {
     let client = Client::new();
@@ -94,6 +106,7 @@ fn unmount(handle: &MountHandle) -> PyResult<()> {
     Ok(())
 }
 
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn which(handle: &MountHandle, path: &str) -> PyResult<Option<OwnerInfo>> {
     let client = Client::new();
@@ -107,6 +120,7 @@ fn which(handle: &MountHandle, path: &str) -> PyResult<Option<OwnerInfo>> {
     }))
 }
 
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn status(root: Option<PathBuf>) -> PyResult<Vec<MountStatus>> {
     let filter_root = match root {
@@ -132,6 +146,7 @@ fn status(root: Option<PathBuf>) -> PyResult<Vec<MountStatus>> {
         .collect())
 }
 
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn unmount_root(root: PathBuf) -> PyResult<()> {
     let root = root.canonicalize().map_err(|e| {
@@ -150,6 +165,7 @@ fn unmount_root(root: PathBuf) -> PyResult<()> {
     Ok(())
 }
 
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn which_root(root: PathBuf, path: &str) -> PyResult<Option<OwnerInfo>> {
     let root = root.canonicalize().map_err(|e| {
@@ -174,6 +190,7 @@ fn which_root(root: PathBuf, path: &str) -> PyResult<Option<OwnerInfo>> {
     }))
 }
 
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn update(handle: &MountHandle, mounts: Vec<Mapping>) -> PyResult<()> {
     let mounts = mounts
@@ -188,6 +205,7 @@ fn update(handle: &MountHandle, mounts: Vec<Mapping>) -> PyResult<()> {
     client.update(handle.mount_id, mounts).map_err(to_pyerr)
 }
 
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn get_manifest(handle: &MountHandle) -> PyResult<Vec<Mapping>> {
     let client = Client::new();
