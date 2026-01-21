@@ -1,15 +1,131 @@
-"""NueFS CLI - layered filesystem management."""
-
+import functools
 import json
 import pathlib
 import sys
 import time
+import typing
 from typing import Annotated
 
+import pathspec
+import platformdirs
 import sheaves.cli
+import yaml
+from sheaves.resource import FileURL, Resource
 
 import nuefs
-from nuefs import workspace
+from nuefs.manifest import LockMapping, MountEntry, NueLock, NueManifest
+
+STATE_DIR = pathlib.Path(platformdirs.user_state_dir("nue"))
+MANIFEST_NAME = "nue.yaml"
+LOCK_NAME = "nue.lock"
+
+
+class WorkspaceNotFoundError(Exception):
+    pass
+
+
+class LockNotFoundError(Exception):
+    pass
+
+
+class Workspace:
+    root: pathlib.Path
+    manifest: NueManifest
+
+    def __init__(self, root: pathlib.Path, manifest: NueManifest) -> None:
+        self.root = root
+        self.manifest = manifest
+
+    @classmethod
+    def find(cls, start: pathlib.Path | None = None) -> typing.Self:
+        current = (start or pathlib.Path.cwd()).resolve()
+
+        while current != current.parent:
+            if (current / MANIFEST_NAME).is_file():
+                break
+            current = current.parent
+        else:
+            if not (current / MANIFEST_NAME).is_file():
+                raise WorkspaceNotFoundError(f"No {MANIFEST_NAME} found")
+
+        data = yaml.safe_load((current / MANIFEST_NAME).read_text(encoding="utf-8"))
+        return cls(current, NueManifest.model_validate(data))
+
+    @property
+    def mounts(self) -> list[nuefs.Mapping]:
+        return [
+            nuefs.Mapping(target=e.target, source=_resolve_source(e.source))
+            for e in self.manifest.mounts
+        ]
+
+    def lock(self) -> NueLock:
+        mappings: list[LockMapping] = []
+        for entry in self.manifest.mounts:
+            mappings.extend(_resolve_mappings(entry))
+
+        lock = NueLock(apiVersion="nue/v1", mappings=mappings)
+        data = lock.model_dump(mode="json")
+        (self.root / LOCK_NAME).write_text(
+            yaml.safe_dump(data, sort_keys=False), encoding="utf-8"
+        )
+        return lock
+
+    def apply(self) -> nuefs.Handle:
+        lock_path = self.root / LOCK_NAME
+        if not lock_path.exists():
+            raise LockNotFoundError(f"No {LOCK_NAME} found, run lock() first")
+
+        data = yaml.safe_load(lock_path.read_text(encoding="utf-8"))
+        lock = NueLock.model_validate(data)
+        mounts = [
+            nuefs.Mapping(target=m.target, source=m.source)
+            for m in lock.mappings
+        ]
+
+        try:
+            handle = nuefs.open(self.root)
+            handle.update(mounts)
+        except RuntimeError:
+            handle = nuefs.open(self.root, mounts)
+        return handle
+
+    def sync(self) -> nuefs.Handle:
+        self.lock()
+        return self.apply()
+
+
+def _resolve_source(source: Resource) -> pathlib.Path:
+    if isinstance(source.root, FileURL):
+        return source.root.to_path().expanduser().resolve()
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    return source.materialize(STATE_DIR)
+
+
+def _resolve_mappings(entry: MountEntry) -> list[LockMapping]:
+    source = _resolve_source(entry.source)
+    target = entry.target
+
+    if not source.exists():
+        return []
+
+    if source.is_file():
+        return [LockMapping(target=target, source=source)]
+
+    all_files = [p.relative_to(source) for p in source.rglob("*") if p.is_file()]
+
+    if entry.include:
+        spec = pathspec.PathSpec.from_lines("gitwildmatch", entry.include)
+        filtered = [f for f in all_files if spec.match_file(str(f))]
+    elif entry.exclude:
+        spec = pathspec.PathSpec.from_lines("gitwildmatch", entry.exclude)
+        filtered = [f for f in all_files if not spec.match_file(str(f))]
+    else:
+        filtered = all_files
+
+    return [
+        LockMapping(target=target / rel, source=source / rel)
+        for rel in sorted(filtered)
+    ]
 
 
 def _load_mounts(config_path: pathlib.Path) -> list[nuefs.Mapping]:
@@ -35,11 +151,13 @@ def _load_mounts(config_path: pathlib.Path) -> list[nuefs.Mapping]:
 
 
 class NueBaseCommand(sheaves.cli.Command, app_name="nue"):
-    """Base command for NueFS layered filesystem."""
+
+    @functools.cached_property
+    def workspace(self) -> Workspace:
+        return Workspace.find()
 
 
 class Mount(NueBaseCommand):
-    """Mount NueFS filesystem."""
 
     root: Annotated[pathlib.Path, sheaves.cli.Positional("Mount root directory")]
     config: Annotated[pathlib.Path | None, sheaves.cli.Option(help="JSON config file with mounts")] = None
@@ -63,7 +181,6 @@ class Mount(NueBaseCommand):
 
 
 class Unmount(NueBaseCommand):
-    """Unmount NueFS filesystem."""
 
     root: Annotated[pathlib.Path, sheaves.cli.Positional("Mount root directory")]
 
@@ -72,7 +189,6 @@ class Unmount(NueBaseCommand):
 
 
 class Which(NueBaseCommand):
-    """Query path ownership in mounted NueFS."""
 
     root: Annotated[pathlib.Path | None, sheaves.cli.Positional("Mount root directory")] = None
     path: Annotated[str, sheaves.cli.Positional("Path to query")]
@@ -81,7 +197,7 @@ class Which(NueBaseCommand):
         if self.root is not None:
             root = self.root.expanduser()
         else:
-            root = workspace.find_workspace()
+            root = self.workspace.root
         info = nuefs.open(root).which(self.path)
         if info is None:
             print("not found")
@@ -90,7 +206,6 @@ class Which(NueBaseCommand):
 
 
 class Status(NueBaseCommand):
-    """Show NueFS mount status."""
 
     def run(self) -> None:
         for h in nuefs.status():
@@ -98,64 +213,30 @@ class Status(NueBaseCommand):
 
 
 class Lock(NueBaseCommand):
-    """Generate nue.lock from nue.yaml manifest."""
 
     def run(self) -> None:
-        ws = workspace.find_workspace()
-        manifest = workspace.load_manifest(ws)
-        lock = workspace.generate_lock(manifest, ws)
-        workspace.write_lock(lock, ws)
-        print(f"Generated {workspace.LOCK_NAME} with {len(lock.mappings)} mappings")
+        lock = self.workspace.lock()
+        print(f"Generated {LOCK_NAME} with {len(lock.mappings)} mappings")
 
 
 class Apply(NueBaseCommand):
-    """Apply nue.lock to mount filesystem (idempotent)."""
 
     def run(self) -> None:
-        ws = workspace.find_workspace()
-        manifest = workspace.load_manifest(ws)
-        lock = workspace.load_lock(ws)
-
-        if not workspace.validate_lock(lock, manifest):
-            raise workspace.LockOutdatedError(
-                f"{workspace.LOCK_NAME} is outdated. Run 'nue lock' first."
-            )
-
-        mounts = workspace.manifest_to_mounts(manifest)
-
-        # Idempotent: update if already mounted, create otherwise
-        try:
-            handle = nuefs.open(ws)
-            handle.update(mounts)
-            print(f"Updated mount at {ws}")
-        except RuntimeError:
-            nuefs.open(ws, mounts)
-            print(f"Created mount at {ws}")
+        self.workspace.apply()
+        print(f"Applied mount at {self.workspace.root}")
 
 
 class Sync(NueBaseCommand):
-    """Lock and apply in one step (lock + apply)."""
 
     def run(self) -> None:
-        ws = workspace.find_workspace()
-        manifest = workspace.load_manifest(ws)
-        lock = workspace.generate_lock(manifest, ws)
-        workspace.write_lock(lock, ws)
-        print(f"Generated {workspace.LOCK_NAME} with {len(lock.mappings)} mappings")
-
-        mounts = workspace.manifest_to_mounts(manifest)
-
-        try:
-            handle = nuefs.open(ws)
-            handle.update(mounts)
-            print(f"Updated mount at {ws}")
-        except RuntimeError:
-            nuefs.open(ws, mounts)
-            print(f"Created mount at {ws}")
+        lock = self.workspace.lock()
+        print(f"Generated {LOCK_NAME} with {len(lock.mappings)} mappings")
+        self.workspace.apply()
+        print(f"Applied mount at {self.workspace.root}")
 
 
 def main() -> int:
-    sheaves.cli.cli(Mount | Unmount | Which | Status | Init | Lock | Apply | Sync).run()
+    sheaves.cli.cli(Mount | Unmount | Which | Status | Lock | Apply | Sync).run()
     return 0
 
 

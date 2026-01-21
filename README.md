@@ -58,6 +58,28 @@ nuefs/
 
 ## Usage
 
+### Workspace (nue.yaml)
+
+```yaml
+# nue.yaml
+apiVersion: nue/v1
+mounts:
+  - target: .
+    source: ~/.dotfiles/base            # base layer
+  - target: .
+    source: ~/.dotfiles/dev             # dev tools layer
+  - target: .
+    source: pkg:github/user/nvim-config # git repository
+```
+
+```bash
+nue lock   # generate nue.lock
+nue apply  # mount filesystem
+nue sync   # lock + apply
+```
+
+### Python API
+
 ```python
 import nuefs
 from pathlib import Path
