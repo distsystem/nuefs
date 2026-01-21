@@ -10,7 +10,7 @@ description = "NueFS - FUSE-based layered filesystem for Python"
 dependencies = ["sheaves"]
 
 [project.scripts]
-nuefs = "nuefs.cli:main"
+nue = "nuefs.cli:main"
 
 [tool.maturin]
 python-source = "python"

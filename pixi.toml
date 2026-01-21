@@ -25,6 +25,7 @@ nuefs = { path = ".", editable = true }
 pydantic = ">=2.0"
 pyyaml = "*"
 returns = "*"
+pathspec = ">=0.12"
 
 [feature.build.activation.env]
 CONDA_BUILD = "1"

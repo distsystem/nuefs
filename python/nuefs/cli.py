@@ -9,6 +9,7 @@ from typing import Annotated
 import sheaves.cli
 
 import nuefs
+from nuefs import workspace
 
 
 def _load_mounts(config_path: pathlib.Path) -> list[nuefs.Mapping]:
@@ -33,11 +34,11 @@ def _load_mounts(config_path: pathlib.Path) -> list[nuefs.Mapping]:
     return result
 
 
-class NueFSSheaf(sheaves.cli.Command, app_name="nuefs"):
+class NueBaseCommand(sheaves.cli.Command, app_name="nue"):
     """Base command for NueFS layered filesystem."""
 
 
-class Mount(NueFSSheaf):
+class Mount(NueBaseCommand):
     """Mount NueFS filesystem."""
 
     root: Annotated[pathlib.Path, sheaves.cli.Positional("Mount root directory")]
@@ -61,7 +62,7 @@ class Mount(NueFSSheaf):
             handle.close()
 
 
-class Unmount(NueFSSheaf):
+class Unmount(NueBaseCommand):
     """Unmount NueFS filesystem."""
 
     root: Annotated[pathlib.Path, sheaves.cli.Positional("Mount root directory")]
@@ -70,21 +71,25 @@ class Unmount(NueFSSheaf):
         nuefs.open(self.root.expanduser()).close()
 
 
-class Which(NueFSSheaf):
+class Which(NueBaseCommand):
     """Query path ownership in mounted NueFS."""
 
-    root: Annotated[pathlib.Path, sheaves.cli.Positional("Mount root directory")]
+    root: Annotated[pathlib.Path | None, sheaves.cli.Positional("Mount root directory")] = None
     path: Annotated[str, sheaves.cli.Positional("Path to query")]
 
     def run(self) -> None:
-        info = nuefs.open(self.root.expanduser()).which(self.path)
+        if self.root is not None:
+            root = self.root.expanduser()
+        else:
+            root = workspace.find_workspace()
+        info = nuefs.open(root).which(self.path)
         if info is None:
             print("not found")
             return
         print(f"owner={info.owner} backend_path={info.backend_path}")
 
 
-class Status(NueFSSheaf):
+class Status(NueBaseCommand):
     """Show NueFS mount status."""
 
     def run(self) -> None:
@@ -92,8 +97,65 @@ class Status(NueFSSheaf):
             print(f"{h.root}")
 
 
+class Lock(NueBaseCommand):
+    """Generate nue.lock from nue.yaml manifest."""
+
+    def run(self) -> None:
+        ws = workspace.find_workspace()
+        manifest = workspace.load_manifest(ws)
+        lock = workspace.generate_lock(manifest, ws)
+        workspace.write_lock(lock, ws)
+        print(f"Generated {workspace.LOCK_NAME} with {len(lock.mappings)} mappings")
+
+
+class Apply(NueBaseCommand):
+    """Apply nue.lock to mount filesystem (idempotent)."""
+
+    def run(self) -> None:
+        ws = workspace.find_workspace()
+        manifest = workspace.load_manifest(ws)
+        lock = workspace.load_lock(ws)
+
+        if not workspace.validate_lock(lock, manifest):
+            raise workspace.LockOutdatedError(
+                f"{workspace.LOCK_NAME} is outdated. Run 'nue lock' first."
+            )
+
+        mounts = workspace.manifest_to_mounts(manifest)
+
+        # Idempotent: update if already mounted, create otherwise
+        try:
+            handle = nuefs.open(ws)
+            handle.update(mounts)
+            print(f"Updated mount at {ws}")
+        except RuntimeError:
+            nuefs.open(ws, mounts)
+            print(f"Created mount at {ws}")
+
+
+class Sync(NueBaseCommand):
+    """Lock and apply in one step (lock + apply)."""
+
+    def run(self) -> None:
+        ws = workspace.find_workspace()
+        manifest = workspace.load_manifest(ws)
+        lock = workspace.generate_lock(manifest, ws)
+        workspace.write_lock(lock, ws)
+        print(f"Generated {workspace.LOCK_NAME} with {len(lock.mappings)} mappings")
+
+        mounts = workspace.manifest_to_mounts(manifest)
+
+        try:
+            handle = nuefs.open(ws)
+            handle.update(mounts)
+            print(f"Updated mount at {ws}")
+        except RuntimeError:
+            nuefs.open(ws, mounts)
+            print(f"Created mount at {ws}")
+
+
 def main() -> int:
-    sheaves.cli.cli(Mount | Unmount | Which | Status).run()
+    sheaves.cli.cli(Mount | Unmount | Which | Status | Init | Lock | Apply | Sync).run()
     return 0
 
 
