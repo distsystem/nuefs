@@ -12,6 +12,9 @@ kill = "pkill -9 nuefsd || true"
 rust = "*"
 python = "=3.12"
 pygit2 = "*"
+humanize = "*"
+pathspec = "*"
+pydantic = ">=2.0"
 
 [activation.env]
 # Ensure nuefsd links with conda sysroot startup objects (missing __libc_csu_init/fini otherwise).
@@ -23,14 +26,6 @@ uv = "*"
 [pypi-dependencies]
 sheaves = { path = "../sheaves", editable = true }
 nuefs = { path = ".", editable = true }
-pydantic = ">=2.0"
-pyyaml = "*"
-returns = "*"
-pathspec = ">=0.12"
-universal-pathlib = "*"
-yarl = "*"
-packageurl-python = "*"
-platformdirs = "*"
 
 [feature.build.activation.env]
 CONDA_BUILD = "1"

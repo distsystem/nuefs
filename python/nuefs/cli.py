@@ -4,7 +4,10 @@ import sys
 import time
 from typing import Annotated
 
+import humanize
 import sheaves.cli
+from rich.panel import Panel
+from sheaves.console import console
 
 import nuefs
 
@@ -69,8 +72,20 @@ class Unmount(NueBaseCommand):
 class Status(NueBaseCommand):
 
     def run(self) -> None:
-        for h in nuefs.status():
-            print(f"{h.root}")
+        info = nuefs.daemon_info()
+        uptime = int(time.time()) - info.started_at
+        mounts = nuefs.status()
+
+        lines = [
+            f"[bold]pid:[/] {info.pid}",
+            f"[bold]socket:[/] {info.socket}",
+            f"[bold]uptime:[/] {humanize.naturaldelta(uptime)}",
+            f"[bold]mounts:[/] {len(mounts)}",
+        ]
+        for h in mounts:
+            lines.append(f"  {h.root}")
+
+        console.print(Panel("\n".join(lines), title="nuefsd", border_style="dim"))
 
 
 def main() -> int:

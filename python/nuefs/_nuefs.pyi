@@ -6,6 +6,14 @@ import os
 import pathlib
 import typing
 
+class DaemonInfo:
+    r"""
+    Information about the running daemon.
+    """
+    pid: builtins.int
+    socket: builtins.str
+    started_at: builtins.int
+
 class Mapping:
     r"""
     Single path mapping: source directory -> target path within mount root.
@@ -27,6 +35,12 @@ class RawHandle:
     """
     root: builtins.str
     mount_id: builtins.int
+
+def _daemon_info() -> DaemonInfo:
+    r"""
+    Get daemon info.
+    """
+    ...
 
 def _get_manifest(mount_id:builtins.int) -> builtins.list[Mapping]:
     r"""

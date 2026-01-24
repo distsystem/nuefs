@@ -65,6 +65,19 @@ pub struct OwnerInfo {
     pub backend_path: PathBuf,
 }
 
+/// Information about the running daemon.
+#[gen_stub_pyclass]
+#[pyclass]
+#[derive(Clone, Debug)]
+pub struct DaemonInfo {
+    #[pyo3(get)]
+    pub pid: u32,
+    #[pyo3(get)]
+    pub socket: PathBuf,
+    #[pyo3(get)]
+    pub started_at: u64,
+}
+
 /// Raw handle data from NueFS daemon.
 #[gen_stub_pyclass]
 #[pyclass]
@@ -113,6 +126,19 @@ fn _status() -> PyResult<Vec<RawHandle>> {
             mount_id: m.mount_id,
         })
         .collect())
+}
+
+/// Get daemon info.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn _daemon_info() -> PyResult<DaemonInfo> {
+    let client = Client::new().map_err(to_pyerr)?;
+    let info = client.daemon_info().map_err(to_pyerr)?;
+    Ok(DaemonInfo {
+        pid: info.pid,
+        socket: info.socket,
+        started_at: info.started_at,
+    })
 }
 
 /// Query path owner. Returns None if not found.
@@ -164,9 +190,11 @@ fn _nuefs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Mapping>()?;
     m.add_class::<RawHandle>()?;
     m.add_class::<OwnerInfo>()?;
+    m.add_class::<DaemonInfo>()?;
     m.add_function(wrap_pyfunction!(_mount, m)?)?;
     m.add_function(wrap_pyfunction!(_unmount, m)?)?;
     m.add_function(wrap_pyfunction!(_status, m)?)?;
+    m.add_function(wrap_pyfunction!(_daemon_info, m)?)?;
     m.add_function(wrap_pyfunction!(_which, m)?)?;
     m.add_function(wrap_pyfunction!(_update, m)?)?;
     m.add_function(wrap_pyfunction!(_resolve, m)?)?;

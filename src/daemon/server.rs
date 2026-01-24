@@ -10,7 +10,7 @@ use tarpc::tokio_serde::formats::Bincode;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::types::{MountSpec, MountStatus, NuefsService, OwnerInfoWire};
+use crate::types::{DaemonInfo, MountSpec, MountStatus, NuefsService, OwnerInfoWire};
 
 use super::manager::{Manager, ManagerError};
 
@@ -26,6 +26,8 @@ pub enum ServerError {
 #[derive(Clone)]
 struct NuefsServer {
     manager: Arc<Mutex<Manager>>,
+    socket_path: PathBuf,
+    started_at: u64,
 }
 
 impl NuefsServer {
@@ -65,6 +67,14 @@ impl NuefsService for NuefsServer {
         self.manager.lock().await.status()
     }
 
+    async fn daemon_info(self, _: tarpc::context::Context) -> DaemonInfo {
+        DaemonInfo {
+            pid: std::process::id(),
+            socket: self.socket_path.clone(),
+            started_at: self.started_at,
+        }
+    }
+
     async fn update(
         self,
         _: tarpc::context::Context,
@@ -90,8 +100,15 @@ impl NuefsService for NuefsServer {
 pub async fn serve(socket_path: PathBuf) -> Result<(), ServerError> {
     let _ = std::fs::remove_file(&socket_path);
 
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
     let server = NuefsServer {
         manager: Arc::new(Mutex::new(Manager::new())),
+        socket_path: socket_path.clone(),
+        started_at,
     };
 
     let listener =

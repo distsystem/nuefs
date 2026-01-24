@@ -9,7 +9,7 @@ use tarpc::serde_transport;
 use tarpc::tokio_serde::formats::Bincode;
 use thiserror::Error;
 
-use crate::types::{MountSpec, MountStatus, NuefsServiceClient, OwnerInfoWire};
+use crate::types::{DaemonInfo, MountSpec, MountStatus, NuefsServiceClient, OwnerInfoWire};
 
 const BIN_ENV: &str = "NUEFSD_BIN";
 
@@ -92,6 +92,10 @@ impl Client {
 
     pub fn status(&self) -> Result<Vec<MountStatus>, ClientError> {
         self.call(|ctx| self.inner.status(ctx))
+    }
+
+    pub fn daemon_info(&self) -> Result<DaemonInfo, ClientError> {
+        self.call(|ctx| self.inner.daemon_info(ctx))
     }
 
     pub fn update(&self, mount_id: u64, mounts: Vec<MountSpec>) -> Result<(), ClientError> {

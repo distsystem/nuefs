@@ -9,6 +9,7 @@ import nuefs._nuefs as _ext
 
 Mapping = _ext.Mapping
 OwnerInfo = _ext.OwnerInfo
+DaemonInfo = _ext.DaemonInfo
 
 
 class Handle:
@@ -78,3 +79,8 @@ def open(
 def status() -> list[Handle]:
     """List all active mounts."""
     return [Handle(str(h.root), h.mount_id) for h in _ext._status()]
+
+
+def daemon_info() -> DaemonInfo:
+    """Get information about the daemon process."""
+    return _ext._daemon_info()
