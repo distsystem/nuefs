@@ -15,6 +15,8 @@ pygit2 = "*"
 humanize = "*"
 pathspec = "*"
 pydantic = ">=2.0"
+packageurl-python = "*"
+universal-pathlib = "*"
 
 [activation.env]
 # Ensure nuefsd links with conda sysroot startup objects (missing __libc_csu_init/fini otherwise).

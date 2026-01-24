@@ -1,77 +1,43 @@
-import json
 import pathlib
 import sys
-import time
-from typing import Annotated
 
-import humanize
-import sheaves.cli
 from rich.panel import Panel
+from sheaves.cli import Command, cli
 from sheaves.console import console
 
 import nuefs
 
-
-def _load_mounts(config_path: pathlib.Path) -> list[nuefs.Mapping]:
-    data = json.loads(config_path.read_text(encoding="utf-8"))
-    if isinstance(data, dict):
-        mounts = data.get("mounts")
-    else:
-        mounts = data
-
-    if not isinstance(mounts, list):
-        raise ValueError("Invalid config: expected a list or an object with 'mounts' list")
-
-    result: list[nuefs.Mapping] = []
-    for item in mounts:
-        if not isinstance(item, dict):
-            raise ValueError("Invalid mount entry: expected an object")
-
-        target = pathlib.Path(str(item.get("target", "")))
-        source = pathlib.Path(str(item.get("source", ""))).expanduser()
-        result.append(nuefs.Mapping(target=target, source=source))
-
-    return result
+from .manifest import Manifest
 
 
-class NueBaseCommand(sheaves.cli.Command, app_name="nue"):
-    pass
+class NueBaseCommand(Manifest, Command, app_name="nue"):
+    @property
+    def root(self) -> pathlib.Path:
+        return self.sheaf_source.parent
 
 
 class Mount(NueBaseCommand):
-
-    root: Annotated[pathlib.Path, sheaves.cli.Positional("Mount root directory")]
-    config: Annotated[pathlib.Path | None, sheaves.cli.Option(help="JSON config file with mounts")] = None
-    foreground: Annotated[bool, sheaves.cli.Flag(help="Run in foreground", short="-f")] = False
-
     def run(self) -> None:
-        root = self.root.expanduser()
-        if self.config is None:
-            raise ValueError("--config is required (JSON file with mounts)")
-
-        mounts = _load_mounts(self.config.expanduser())
-        handle = nuefs.open(root, mounts)
-        if not self.foreground:
-            return
-
-        try:
-            while True:
-                time.sleep(3600)
-        except KeyboardInterrupt:
-            handle.close()
+        mounts = [
+            nuefs.Mapping(
+                target=pathlib.Path(str(entry.target)),
+                source=pathlib.Path(str(entry.source)).expanduser(),
+            )
+            for entry in self.mounts
+        ]
+        nuefs.open(self.root, mounts)
 
 
 class Unmount(NueBaseCommand):
-
-    root: Annotated[pathlib.Path, sheaves.cli.Positional("Mount root directory")]
-
     def run(self) -> None:
-        nuefs.open(self.root.expanduser()).close()
+        nuefs.open(self.root).close()
 
 
 class Status(NueBaseCommand):
-
     def run(self) -> None:
+        import time
+        import humanize
+
         info = nuefs.daemon_info()
         uptime = int(time.time()) - info.started_at
         mounts = nuefs.status()
@@ -89,7 +55,7 @@ class Status(NueBaseCommand):
 
 
 def main() -> int:
-    sheaves.cli.cli(Mount | Unmount | Status).run()
+    cli(Mount | Unmount | Status).run()
     return 0
 
 
