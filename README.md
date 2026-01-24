@@ -1,104 +1,46 @@
 # NueFS
 
-FUSE-based layered filesystem for Python.
+FUSE-based union filesystem for Python.
 
-Named after [Nue (鵺)](https://en.wikipedia.org/wiki/Nue), a Japanese chimera with parts from different animals — just like NueFS merges files from different sources into a unified view.
+Named after [Nue (鵺)](https://en.wikipedia.org/wiki/Nue), a Japanese chimera with parts from different animals — just like NueFS composes files from different layers into a unified view.
 
-## Architecture
+## Why
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Python                               │
-│  handle = nuefs.open(root, mounts)                          │
-│  handle.which(path)                                         │
-│  handle.close()                                             │
-└─────────────────────────────────────────────────────────────┘
-                              │ pyo3 FFI
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Rust Extension (_nuefs.so)                │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
-│  │ #[pyclass]  │    │ IPC Client  │    │ Auto-start  │     │
-│  │ Mapping     │    │ Unix Socket │    │ nuefsd      │     │
-│  │ RawHandle   │    │ tarpc       │    │ (if needed) │     │
-│  └─────────────┘    └─────────────┘    └─────────────┘     │
-└─────────────────────────────────────────────────────────────┘
-                              │ IPC (Unix Socket)
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Rust Daemon (nuefsd)                      │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
-│  │ IPC Server  │    │ Mount       │    │ FUSE        │     │
-│  │ Dispatcher  │───▶│ Manager     │───▶│ Sessions    │     │
-│  └─────────────┘    └─────────────┘    └─────────────┘     │
-└─────────────────────────────────────────────────────────────┘
-```
+You have a project template (cookiecutter, copier, etc.) and want to keep it in sync with your projects. But once you scaffold a project, the template files are copied — updates require manual merging or re-scaffolding.
 
-## Project Structure
+NueFS creates a **live template overlay**: template files appear directly in your project without copying. The template repo stays independent with its own git history — but your project sees the latest template files instantly.
 
-```
-nuefs/
-├── Cargo.toml
-├── src/
-│   ├── lib.rs          # pyo3 entry (Python API)
-│   ├── client.rs       # IPC client
-│   ├── types.rs        # Shared type definitions
-│   ├── daemon/
-│   │   ├── mod.rs
-│   │   ├── server.rs   # IPC server
-│   │   ├── manager.rs  # Mount manager
-│   │   └── fuse.rs     # FUSE implementation
-│   └── bin/
-│       └── nuefsd.rs   # Daemon entry
-└── python/
-    └── nuefs/
-        ├── __init__.py
-        └── cli.py
+- **Write-through**: Edits to template files go directly to the template repo
+- **No copies**: Template updates appear immediately in all projects
+- **No symlinks**: Tools see real files, directories merge naturally
+
+## Union View
+
+```text
+~/myproject/                    # your project (union view)
+  .git/                         # from: ~/myproject/.git (project's own git)
+  nue.yaml                      # from: ~/myproject/ (base layer)
+  .eslintrc.json                # from: ~/templates/typescript/.eslintrc.json
+  .prettierrc                   # from: ~/templates/typescript/.prettierrc
+  tsconfig.json                 # from: ~/templates/typescript/tsconfig.json
+  .github/
+    workflows/
+      ci.yml                    # from: ~/templates/typescript/.github/workflows/
+  src/
+    index.ts                    # from: ~/myproject/src/ (your code)
+    utils.ts                    # from: ~/myproject/src/ (your code)
+
+~/templates/typescript/         # template repo (independent git repo)
+  .git/                         # stays here, NOT mounted to projects
+  .eslintrc.json
+  .prettierrc
+  tsconfig.json
+  .github/
+    workflows/
+      ci.yml
 ```
 
-## Usage
-
-### Workspace (nue.yaml)
-
-```yaml
-# nue.yaml
-apiVersion: nue/v1
-mounts:
-  - target: .
-    source: ~/.dotfiles/base            # base layer
-  - target: .
-    source: ~/.dotfiles/dev             # dev tools layer
-  - target: .
-    source: pkg:github/user/nvim-config # git repository
-```
-
-```bash
-nue lock   # generate nue.lock
-nue apply  # mount filesystem
-nue sync   # lock + apply
-```
-
-### Python API
-
-```python
-import nuefs
-from pathlib import Path
-
-handle = nuefs.open(
-    root=Path("~/project"),
-    mounts=[
-        nuefs.Mapping(target=".config/nvim", source="~/.layers/nvim"),
-    ],
-)
-
-# Query ownership
-info = handle.which(".config/nvim/init.lua")
-if info:
-    print(f"Owner: {info.owner}, Path: {info.backend_path}")
-
-# Unmount
-handle.close()
-```
+Unlike cookiecutter/copier, template files are not copied — they're mounted. Update the template once, all projects see the change.
 
 ## Requirements
 
