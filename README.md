@@ -42,6 +42,24 @@ NueFS creates a **live template overlay**: template files appear directly in you
 
 Unlike cookiecutter/copier, template files are not copied — they're mounted. Update the template once, all projects see the change.
 
+## Mount Types
+
+NueFS supports both directory and single-file mounts:
+
+```yaml
+# nue.yaml
+mounts:
+  # Directory mount: entire directory appears at target path
+  - source: ~/repos/core
+    target: packages/core
+
+  # Single-file mount: individual file appears at target path
+  - source: ~/repos/shared-configs/.eslintrc.json
+    target: .eslintrc.json
+```
+
+This is the key advantage over git submodules — you can mount individual config files (`.eslintrc`, `.prettierrc`, `tsconfig.json`) directly into your workspace root without nesting them in subdirectories.
+
 ## Requirements
 
 - Linux with FUSE support

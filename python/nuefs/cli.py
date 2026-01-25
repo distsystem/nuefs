@@ -25,7 +25,8 @@ class Mount(NueBaseCommand):
             )
             for entry in self.mounts
         ]
-        nuefs.open(self.root, mounts)
+        with nuefs.open(self.root) as handle:
+            handle.mount(mounts)
 
 
 class Unmount(NueBaseCommand):

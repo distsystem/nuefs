@@ -40,6 +40,8 @@ struct MountSession {
     real_root_fd: File,
     mounts: Vec<MountSpec>,
     manifest: Arc<RwLock<Manifest>>,
+    /// FUSE session handle. Dropped on unmount to trigger automatic unmount.
+    #[allow(dead_code)]
     session: Option<fuser::BackgroundSession>,
 }
 
@@ -65,10 +67,14 @@ impl Manager {
         let access_root = PathBuf::from(format!("/proc/self/fd/{}", real_root_fd.as_raw_fd()));
 
         let manifest = Arc::new(RwLock::new(Manifest::build(&root, &access_root, &mounts)?));
-        let fs = NueFs::new(access_root, manifest.clone());
+        let notifier = Arc::new(RwLock::new(None));
+        let fs = NueFs::new(access_root, manifest.clone(), notifier.clone());
 
         let options = vec![fuser::MountOption::FSName("nuefs".to_string())];
         let session = fuser::spawn_mount2(fs, &root, &options)?;
+
+        // Set notifier after session is created
+        *notifier.write() = Some(session.notifier());
 
         let mount_id = self.next_mount_id;
         self.next_mount_id += 1;
@@ -89,16 +95,22 @@ impl Manager {
     }
 
     pub fn unmount(&mut self, mount_id: u64) -> Result<(), ManagerError> {
-        let mut session = self
+        let session = self
             .mounts
             .remove(&mount_id)
             .ok_or(ManagerError::UnknownMountId(mount_id))?;
 
         self.mounts_by_root.remove(&session.root);
 
-        if let Some(bg) = session.session.take() {
-            bg.join();
-        }
+        // Use lazy unmount to avoid blocking when processes are using the mount.
+        // fusermount3 -u -z does MNT_DETACH which detaches immediately.
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", "-z"])
+            .arg(&session.root)
+            .status();
+
+        // Drop session after unmount command.
+        drop(session);
 
         Ok(())
     }
@@ -265,6 +277,29 @@ impl Manifest {
         let target = Self::normalize_target(&mount.target);
         let source_root = mount.source.clone();
 
+        // Handle single file mount
+        if mount.source.is_file() {
+            let should_insert = match self.entries.get(&target) {
+                None => true,
+                Some(existing) if existing.is_dir => true,
+                Some(_) => true,
+            };
+
+            if should_insert {
+                self.entries.insert(
+                    target,
+                    Entry {
+                        source: Source::Layer {
+                            source_root: source_root.clone(),
+                            backend_path: mount.source.clone(),
+                        },
+                        is_dir: false,
+                    },
+                );
+            }
+            return Ok(());
+        }
+
         let mut on_entry = |manifest: &mut Self, rel_path: &str, entry_path: &Path, is_dir: bool| {
             let should_insert = match manifest.entries.get(rel_path) {
                 None => true,
@@ -339,6 +374,30 @@ impl Manifest {
         }
 
         children.into_iter().collect()
+    }
+
+    pub(crate) fn add_entry(&mut self, path: &str, is_dir: bool) {
+        let path = path.trim_start_matches('/');
+        self.entries.insert(
+            path.to_string(),
+            Entry {
+                source: Source::Real,
+                is_dir,
+            },
+        );
+    }
+
+    pub(crate) fn remove_entry(&mut self, path: &str) {
+        let path = path.trim_start_matches('/');
+        self.entries.remove(path);
+    }
+
+    pub(crate) fn rename_entry(&mut self, old_path: &str, new_path: &str) {
+        let old_path = old_path.trim_start_matches('/');
+        let new_path = new_path.trim_start_matches('/');
+        if let Some(entry) = self.entries.remove(old_path) {
+            self.entries.insert(new_path.to_string(), entry);
+        }
     }
 
     pub(crate) fn create_target(&self, parent_path: &str) -> PathBuf {

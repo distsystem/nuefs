@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
+    FileAttr, FileType, Filesystem, Notifier, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
 use parking_lot::RwLock;
 
@@ -63,10 +63,15 @@ pub(crate) struct NueFs {
     next_ino: AtomicU64,
     handles: RwLock<HashMap<u64, File>>,
     next_fh: AtomicU64,
+    notifier: Arc<RwLock<Option<Notifier>>>,
 }
 
 impl NueFs {
-    pub(crate) fn new(real_root: PathBuf, manifest: Arc<RwLock<Manifest>>) -> Self {
+    pub(crate) fn new(
+        real_root: PathBuf,
+        manifest: Arc<RwLock<Manifest>>,
+        notifier: Arc<RwLock<Option<Notifier>>>,
+    ) -> Self {
         let mut inodes = HashMap::new();
         let mut paths = HashMap::new();
 
@@ -81,6 +86,14 @@ impl NueFs {
             next_ino: AtomicU64::new(2),
             handles: RwLock::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
+            notifier,
+        }
+    }
+
+    /// Notify kernel of entry invalidation (triggers inotify)
+    fn notify_inval_entry(&self, parent_ino: u64, name: &str) {
+        if let Some(ref notifier) = *self.notifier.read() {
+            let _ = notifier.inval_entry(parent_ino, std::ffi::OsStr::new(name));
         }
     }
 
@@ -238,6 +251,49 @@ impl Filesystem for NueFs {
         reply.ok();
     }
 
+    fn readdirplus(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectoryPlus,
+    ) {
+        let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
+        let manifest = self.manifest.read();
+
+        let mut entries: Vec<(u64, FileAttr, String)> = Vec::new();
+
+        // Add . and ..
+        if let Some(dot_attr) = self.get_attr(ino, &self.real_root) {
+            entries.push((ino, dot_attr, ".".to_string()));
+        }
+        let parent_ino = if path.is_empty() { 1 } else { ino };
+        if let Some(dotdot_attr) = self.get_attr(parent_ino, &self.real_root) {
+            entries.push((parent_ino, dotdot_attr, "..".to_string()));
+        }
+
+        for (name, _is_dir) in manifest.readdir(&path) {
+            let child_path = join_child(&path, &name);
+            if let Some(backend_path) = manifest.resolve(&child_path) {
+                let child_ino = self.get_or_create_ino(&child_path);
+                if let Some(attr) = self.get_attr(child_ino, &backend_path) {
+                    entries.push((child_ino, attr, name));
+                }
+            }
+        }
+
+        drop(manifest);
+
+        for (i, (child_ino, attr, name)) in entries.into_iter().enumerate().skip(offset as usize) {
+            if reply.add(child_ino, (i + 1) as i64, &name, &TTL, &attr, 0) {
+                break;
+            }
+        }
+
+        reply.ok();
+    }
+
     fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
         let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
         let backend_path = option_or_reply!(self.manifest.read().resolve(&path), reply, libc::ENOENT);
@@ -338,6 +394,8 @@ impl Filesystem for NueFs {
 
         let ino = self.get_or_create_ino(&child_path);
         let fh = self.alloc_fh(file);
+        self.manifest.write().add_entry(&child_path, false);
+        self.notify_inval_entry(parent, &name);
 
         let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::EIO);
         reply.created(&TTL, &attr, 0, fh, 0);
@@ -350,6 +408,8 @@ impl Filesystem for NueFs {
         let backend_path =
             option_or_reply!(self.manifest.read().resolve(&child_path), reply, libc::ENOENT);
         io_or_reply!(fs::remove_file(&backend_path), reply);
+        self.manifest.write().remove_entry(&child_path);
+        self.notify_inval_entry(parent, &name);
         reply.ok();
     }
 
@@ -374,6 +434,8 @@ impl Filesystem for NueFs {
         }
 
         let ino = self.get_or_create_ino(&child_path);
+        self.manifest.write().add_entry(&child_path, true);
+        self.notify_inval_entry(parent, &name);
 
         let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::EIO);
         reply.entry(&TTL, &attr, 0);
@@ -386,6 +448,8 @@ impl Filesystem for NueFs {
         let backend_path =
             option_or_reply!(self.manifest.read().resolve(&child_path), reply, libc::ENOENT);
         io_or_reply!(fs::remove_dir(&backend_path), reply);
+        self.manifest.write().remove_entry(&child_path);
+        self.notify_inval_entry(parent, &name);
         reply.ok();
     }
 
@@ -408,17 +472,21 @@ impl Filesystem for NueFs {
         let old_path = join_child(&parent_path, name.as_ref());
         let new_path = join_child(&newparent_path, newname.as_ref());
 
-        let manifest = self.manifest.read();
-        let old_backend = option_or_reply!(manifest.resolve(&old_path), reply, libc::ENOENT);
-        let new_backend = match manifest.resolve(&new_path) {
-            Some(p) => p,
-            None => {
-                let target_dir = manifest.create_target(&newparent_path);
-                target_dir.join(newname.as_ref())
-            }
+        let (old_backend, new_backend) = {
+            let manifest = self.manifest.read();
+            let old_backend = option_or_reply!(manifest.resolve(&old_path), reply, libc::ENOENT);
+            let new_backend = match manifest.resolve(&new_path) {
+                Some(p) => p,
+                None => {
+                    let target_dir = manifest.create_target(&newparent_path);
+                    target_dir.join(newname.as_ref())
+                }
+            };
+            (old_backend, new_backend)
         };
 
         io_or_reply!(fs::rename(&old_backend, &new_backend), reply);
+        self.manifest.write().rename_entry(&old_path, &new_path);
         reply.ok();
     }
 

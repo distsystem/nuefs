@@ -31,8 +31,8 @@ class Handle:
         """Get the current mount manifest."""
         return _ext._get_manifest(self._mount_id)
 
-    def update(self, mounts: collections.abc.Sequence[Mapping]) -> None:
-        """Update the mount manifest."""
+    def mount(self, mounts: collections.abc.Sequence[Mapping]) -> None:
+        """Set/update the mount configuration."""
         _ext._update(self._mount_id, list(mounts))
 
     def which(self, path: str) -> OwnerInfo | None:
@@ -52,28 +52,19 @@ class Handle:
         exc_val: BaseException | None,
         exc_tb: typing.Any,
     ) -> bool:
-        self.close()
         return False
 
 
-def open(
-    root: str | os.PathLike[str] | pathlib.Path,
-    mounts: collections.abc.Sequence[Mapping] | None = None,
-) -> Handle:
-    """Open a NueFS mount.
-
-    If mounts is provided, creates a new mount; otherwise resolves existing.
-    """
+def open(root: str | os.PathLike[str] | pathlib.Path) -> Handle:
+    """Open a NueFS mount, creating an empty one if it doesn't exist."""
     root_path = pathlib.Path(root).expanduser().resolve()
-
-    if mounts is not None:
-        raw = _ext._mount(root_path, list(mounts))
-        return Handle(str(raw.root), raw.mount_id)
 
     mount_id = _ext._resolve(root_path)
     if mount_id is not None:
         return Handle(str(root_path), mount_id)
-    raise RuntimeError("Mount not found")
+
+    raw = _ext._mount(root_path, [])
+    return Handle(str(raw.root), raw.mount_id)
 
 
 def status() -> list[Handle]:

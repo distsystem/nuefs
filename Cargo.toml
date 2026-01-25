@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
 pyo3-stub-gen = "0.7"
-fuser = "0.15"
+fuser = { version = "0.15", features = ["abi-7-18"] }
 libc = "0.2"
 thiserror = "2"
 parking_lot = "0.12"

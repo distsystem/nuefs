@@ -1,5 +1,11 @@
 use python skill
 
+## Development
+
+```bash
+pixi run develop  # Build and install the package
+```
+
 ## Architecture
 
 ```
