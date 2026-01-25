@@ -1,13 +1,13 @@
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs::File;
 use std::os::fd::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
 use thiserror::Error;
 
-use crate::types::{MountSpec, MountStatus, OwnerInfoWire};
+use crate::types::{ManifestEntry, MountStatus, OwnerInfoWire};
 
 use super::fuse::NueFs;
 
@@ -24,9 +24,6 @@ pub enum ManagerError {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-
-    #[error(transparent)]
-    Manifest(#[from] ManifestError),
 }
 
 pub struct Manager {
@@ -38,7 +35,6 @@ pub struct Manager {
 struct MountSession {
     root: PathBuf,
     real_root_fd: File,
-    mounts: Vec<MountSpec>,
     manifest: Arc<RwLock<Manifest>>,
     notifier: Arc<RwLock<Option<fuser::Notifier>>>,
     /// FUSE session handle. Dropped on unmount to trigger automatic unmount.
@@ -55,7 +51,11 @@ impl Manager {
         }
     }
 
-    pub fn mount(&mut self, root: PathBuf, mounts: Vec<MountSpec>) -> Result<u64, ManagerError> {
+    pub fn mount(
+        &mut self,
+        root: PathBuf,
+        entries: Vec<ManifestEntry>,
+    ) -> Result<u64, ManagerError> {
         let root = root
             .canonicalize()
             .map_err(|e| ManagerError::InvalidRoot(e.to_string()))?;
@@ -67,7 +67,11 @@ impl Manager {
         let real_root_fd = File::open(&root)?;
         let access_root = PathBuf::from(format!("/proc/self/fd/{}", real_root_fd.as_raw_fd()));
 
-        let manifest = Arc::new(RwLock::new(Manifest::build(&root, &access_root, &mounts)?));
+        let manifest = Arc::new(RwLock::new(Manifest::from_entries(
+            root.clone(),
+            access_root.clone(),
+            entries,
+        )));
         let notifier = Arc::new(RwLock::new(None));
         let fs = NueFs::new(access_root, manifest.clone(), notifier.clone());
 
@@ -85,7 +89,6 @@ impl Manager {
             MountSession {
                 root: root.clone(),
                 real_root_fd,
-                mounts,
                 manifest,
                 notifier,
                 session: Some(session),
@@ -148,7 +151,7 @@ impl Manager {
     pub fn update(
         &mut self,
         mount_id: u64,
-        new_mounts: Vec<MountSpec>,
+        entries: Vec<ManifestEntry>,
     ) -> Result<(), ManagerError> {
         let session = self
             .mounts
@@ -159,7 +162,7 @@ impl Manager {
             "/proc/self/fd/{}",
             session.real_root_fd.as_raw_fd()
         ));
-        let new_manifest = Manifest::build(&session.root, &access_root, &new_mounts)?;
+        let new_manifest = Manifest::from_entries(session.root.clone(), access_root, entries);
 
         let old_root_children: Vec<String> = session
             .manifest
@@ -174,7 +177,6 @@ impl Manager {
             .map(|(name, _is_dir)| name)
             .collect();
 
-        session.mounts = new_mounts;
         *session.manifest.write() = new_manifest;
 
         if let Some(ref notifier) = *session.notifier.read() {
@@ -192,24 +194,13 @@ impl Manager {
 
         Ok(())
     }
-
-    pub fn get_manifest(&self, mount_id: u64) -> Result<Vec<MountSpec>, ManagerError> {
-        let session = self
-            .mounts
-            .get(&mount_id)
-            .ok_or(ManagerError::UnknownMountId(mount_id))?;
-        Ok(session.mounts.clone())
-    }
 }
 
 /// Source of a file/directory.
 #[derive(Clone, Debug)]
 enum Source {
     Real,
-    Layer {
-        source_root: PathBuf,
-        backend_path: PathBuf,
-    },
+    Layer { backend_path: PathBuf },
 }
 
 #[derive(Clone, Debug)]
@@ -226,161 +217,28 @@ pub(crate) struct Manifest {
 }
 
 impl Manifest {
-    pub(crate) fn build(
-        display_root: &Path,
-        access_root: &Path,
-        mounts: &[MountSpec],
-    ) -> Result<Self, ManifestError> {
-        let mut manifest = Self {
-            display_root: display_root.to_path_buf(),
-            access_root: access_root.to_path_buf(),
-            entries: HashMap::new(),
-        };
-
-        manifest.scan_real(access_root)?;
-
-        for mount in mounts.iter().rev() {
-            manifest.scan_layer(mount)?;
-        }
-
-        Ok(manifest)
-    }
-
-    fn walk_dir<F>(
-        &mut self,
-        dir: &Path,
-        prefix: &str,
-        on_entry: &mut F,
-    ) -> Result<(), ManifestError>
-    where
-        F: FnMut(&mut Self, &str, &Path, bool) -> Result<(), ManifestError>,
-    {
-        if !dir.exists() {
-            return Ok(());
-        }
-
-        for entry in fs::read_dir(dir).map_err(|e| ManifestError::Io {
-            path: dir.to_path_buf(),
-            source: e,
-        })? {
-            let entry = entry.map_err(|e| ManifestError::Io {
-                path: dir.to_path_buf(),
-                source: e,
-            })?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            let rel_path = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-
-            let metadata = entry.metadata().map_err(|e| ManifestError::Io {
-                path: entry.path(),
-                source: e,
-            })?;
-            let is_dir = metadata.is_dir();
-
-            on_entry(self, &rel_path, &entry.path(), is_dir)?;
-
-            if is_dir {
-                // `.git/**` is reserved at the union root. Normal operation uses gitdir
-                // indirection so `.git` becomes a file; in that case this branch won't run.
-                // If `.git` is a directory, avoid enumerating its contents.
-                if rel_path == ".git" {
-                    continue;
-                }
-                self.walk_dir(&entry.path(), &rel_path, on_entry)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn scan_real(&mut self, dir: &Path) -> Result<(), ManifestError> {
-        let mut on_entry =
-            |manifest: &mut Self, rel_path: &str, _entry_path: &Path, is_dir: bool| {
-                manifest.entries.insert(
-                    rel_path.to_string(),
-                    Entry {
-                        source: Source::Real,
-                        is_dir,
+    pub(crate) fn from_entries(
+        display_root: PathBuf,
+        access_root: PathBuf,
+        entries: Vec<ManifestEntry>,
+    ) -> Self {
+        let mut map = HashMap::new();
+        for e in entries {
+            map.insert(
+                e.virtual_path,
+                Entry {
+                    source: Source::Layer {
+                        backend_path: e.backend_path,
                     },
-                );
-                Ok(())
-            };
-        self.walk_dir(dir, "", &mut on_entry)
-    }
-
-    fn normalize_target(target: &Path) -> String {
-        let target = target.to_string_lossy();
-        let target = target.trim_start_matches("./");
-        if target == "." {
-            String::new()
-        } else {
-            target.to_string()
+                    is_dir: e.is_dir,
+                },
+            );
         }
-    }
-
-    fn scan_layer(&mut self, mount: &MountSpec) -> Result<(), ManifestError> {
-        let target = Self::normalize_target(&mount.target);
-        let source_root = mount.source.clone();
-
-        // `.git/**` is reserved at the union root. Never import it from layers.
-        if target == ".git" || target.starts_with(".git/") {
-            return Ok(());
+        Self {
+            display_root,
+            access_root,
+            entries: map,
         }
-
-        // Handle single file mount
-        if mount.source.is_file() {
-            let should_insert = match self.entries.get(&target) {
-                None => true,
-                Some(existing) if existing.is_dir => true,
-                Some(_) => true,
-            };
-
-            if should_insert {
-                self.entries.insert(
-                    target,
-                    Entry {
-                        source: Source::Layer {
-                            source_root: source_root.clone(),
-                            backend_path: mount.source.clone(),
-                        },
-                        is_dir: false,
-                    },
-                );
-            }
-            return Ok(());
-        }
-
-        let mut on_entry =
-            |manifest: &mut Self, rel_path: &str, entry_path: &Path, is_dir: bool| {
-                if rel_path == ".git" || rel_path.starts_with(".git/") {
-                    return Ok(());
-                }
-                let should_insert = match manifest.entries.get(rel_path) {
-                    None => true,
-                    Some(existing) if existing.is_dir && is_dir => false,
-                    Some(_) => true,
-                };
-
-                if should_insert {
-                    manifest.entries.insert(
-                        rel_path.to_string(),
-                        Entry {
-                            source: Source::Layer {
-                                source_root: source_root.clone(),
-                                backend_path: entry_path.to_path_buf(),
-                            },
-                            is_dir,
-                        },
-                    );
-                }
-
-                Ok(())
-            };
-
-        self.walk_dir(&mount.source, &target, &mut on_entry)
     }
 
     pub(crate) fn which(&self, path: &str) -> Option<OwnerInfoWire> {
@@ -390,11 +248,8 @@ impl Manifest {
                 owner: "real".to_string(),
                 backend_path: self.display_root.join(path),
             },
-            Source::Layer {
-                source_root,
-                backend_path,
-            } => OwnerInfoWire {
-                owner: source_root.to_string_lossy().to_string(),
+            Source::Layer { backend_path } => OwnerInfoWire {
+                owner: "layer".to_string(),
                 backend_path: backend_path.clone(),
             },
         })
@@ -507,13 +362,4 @@ impl Manifest {
             self.access_root.join(parent_path)
         }
     }
-}
-
-#[derive(Debug, Error)]
-pub enum ManifestError {
-    #[error("IO error at {path}: {source}")]
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
 }

@@ -14,6 +14,15 @@ class DaemonInfo:
     socket: builtins.str
     started_at: builtins.int
 
+class ManifestEntry:
+    r"""
+    Pre-computed manifest entry for IPC.
+    """
+    virtual_path: builtins.str
+    backend_path: builtins.str
+    is_dir: builtins.bool
+    def __new__(cls,virtual_path:builtins.str, backend_path:builtins.str | os.PathLike | pathlib.Path, is_dir:builtins.bool): ...
+
 class Mapping:
     r"""
     Single path mapping: source directory -> target path within mount root.
@@ -42,13 +51,7 @@ def _daemon_info() -> DaemonInfo:
     """
     ...
 
-def _get_manifest(mount_id:builtins.int) -> builtins.list[Mapping]:
-    r"""
-    Get current mount manifest.
-    """
-    ...
-
-def _mount(root:builtins.str | os.PathLike | pathlib.Path, mounts:typing.Sequence[Mapping]) -> RawHandle:
+def _mount(root:builtins.str | os.PathLike | pathlib.Path, entries:typing.Sequence[ManifestEntry]) -> RawHandle:
     r"""
     Create a new mount.
     """
@@ -72,7 +75,7 @@ def _unmount(mount_id:builtins.int) -> None:
     """
     ...
 
-def _update(mount_id:builtins.int, mounts:typing.Sequence[Mapping]) -> None:
+def _update(mount_id:builtins.int, entries:typing.Sequence[ManifestEntry]) -> None:
     r"""
     Update mount manifest.
     """

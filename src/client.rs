@@ -9,7 +9,7 @@ use tarpc::serde_transport;
 use tarpc::tokio_serde::formats::Bincode;
 use thiserror::Error;
 
-use crate::types::{DaemonInfo, MountSpec, MountStatus, NuefsServiceClient, OwnerInfoWire};
+use crate::types::{DaemonInfo, ManifestEntry, MountStatus, NuefsServiceClient, OwnerInfoWire};
 
 const BIN_ENV: &str = "NUEFSD_BIN";
 
@@ -83,8 +83,8 @@ impl Client {
         self.call(f)?.map_err(ClientError::Daemon)
     }
 
-    pub fn mount(&self, root: PathBuf, mounts: Vec<MountSpec>) -> Result<u64, ClientError> {
-        self.call_daemon(|ctx| self.inner.mount(ctx, root, mounts))
+    pub fn mount(&self, root: PathBuf, entries: Vec<ManifestEntry>) -> Result<u64, ClientError> {
+        self.call_daemon(|ctx| self.inner.mount(ctx, root, entries))
     }
 
     pub fn unmount(&self, mount_id: u64) -> Result<(), ClientError> {
@@ -103,12 +103,8 @@ impl Client {
         self.call(|ctx| self.inner.daemon_info(ctx))
     }
 
-    pub fn update(&self, mount_id: u64, mounts: Vec<MountSpec>) -> Result<(), ClientError> {
-        self.call_daemon(|ctx| self.inner.update(ctx, mount_id, mounts))
-    }
-
-    pub fn get_manifest(&self, mount_id: u64) -> Result<Vec<MountSpec>, ClientError> {
-        self.call_daemon(|ctx| self.inner.get_manifest(ctx, mount_id))
+    pub fn update(&self, mount_id: u64, entries: Vec<ManifestEntry>) -> Result<(), ClientError> {
+        self.call_daemon(|ctx| self.inner.update(ctx, mount_id, entries))
     }
 
     pub fn resolve(&self, root: PathBuf) -> Result<Option<u64>, ClientError> {

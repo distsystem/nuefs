@@ -10,27 +10,8 @@ use pyo3_stub_gen::define_stub_info_gatherer;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
 use crate::client::Client;
-use crate::types::MountSpec;
 
 define_stub_info_gatherer!(stub_info);
-
-impl From<Mapping> for MountSpec {
-    fn from(mapping: Mapping) -> Self {
-        Self {
-            target: mapping.target,
-            source: mapping.source,
-        }
-    }
-}
-
-impl From<MountSpec> for Mapping {
-    fn from(spec: MountSpec) -> Self {
-        Self {
-            target: spec.target,
-            source: spec.source,
-        }
-    }
-}
 
 /// Single path mapping: source directory -> target path within mount root.
 #[gen_stub_pyclass]
@@ -51,6 +32,45 @@ impl Mapping {
     #[new]
     fn new(target: PathBuf, source: PathBuf) -> Self {
         Self { target, source }
+    }
+}
+
+/// Pre-computed manifest entry for IPC.
+#[gen_stub_pyclass]
+#[pyclass]
+#[derive(Clone, Debug)]
+pub struct ManifestEntry {
+    /// Relative path within mount root.
+    #[pyo3(get, set)]
+    pub virtual_path: String,
+    /// Absolute path to backend file.
+    #[pyo3(get, set)]
+    pub backend_path: PathBuf,
+    /// Whether this entry is a directory.
+    #[pyo3(get, set)]
+    pub is_dir: bool,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl ManifestEntry {
+    #[new]
+    fn new(virtual_path: String, backend_path: PathBuf, is_dir: bool) -> Self {
+        Self {
+            virtual_path,
+            backend_path,
+            is_dir,
+        }
+    }
+}
+
+impl From<ManifestEntry> for types::ManifestEntry {
+    fn from(e: ManifestEntry) -> Self {
+        Self {
+            virtual_path: e.virtual_path,
+            backend_path: e.backend_path,
+            is_dir: e.is_dir,
+        }
     }
 }
 
@@ -92,15 +112,15 @@ pub struct RawHandle {
 /// Create a new mount.
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn _mount(root: PathBuf, mounts: Vec<Mapping>) -> PyResult<RawHandle> {
+fn _mount(root: PathBuf, entries: Vec<ManifestEntry>) -> PyResult<RawHandle> {
     let root = root.canonicalize().map_err(|e| {
         PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Invalid root path: {e}"))
     })?;
 
-    let mounts: Vec<MountSpec> = mounts.into_iter().map(Into::into).collect();
+    let entries: Vec<types::ManifestEntry> = entries.into_iter().map(Into::into).collect();
 
     let client = Client::new().map_err(to_pyerr)?;
-    let mount_id = client.mount(root.clone(), mounts).map_err(to_pyerr)?;
+    let mount_id = client.mount(root.clone(), entries).map_err(to_pyerr)?;
 
     Ok(RawHandle { root, mount_id })
 }
@@ -156,11 +176,11 @@ fn _which(mount_id: u64, path: String) -> PyResult<Option<OwnerInfo>> {
 /// Update mount manifest.
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn _update(mount_id: u64, mounts: Vec<Mapping>) -> PyResult<()> {
-    let mounts: Vec<MountSpec> = mounts.into_iter().map(Into::into).collect();
+fn _update(mount_id: u64, entries: Vec<ManifestEntry>) -> PyResult<()> {
+    let entries: Vec<types::ManifestEntry> = entries.into_iter().map(Into::into).collect();
 
     let client = Client::new().map_err(to_pyerr)?;
-    client.update(mount_id, mounts).map_err(to_pyerr)
+    client.update(mount_id, entries).map_err(to_pyerr)
 }
 
 /// Resolve an existing mount by root. Returns mount_id if found.
@@ -171,16 +191,6 @@ fn _resolve(root: PathBuf) -> PyResult<Option<u64>> {
     client.resolve(root).map_err(to_pyerr)
 }
 
-/// Get current mount manifest.
-#[gen_stub_pyfunction]
-#[pyfunction]
-fn _get_manifest(mount_id: u64) -> PyResult<Vec<Mapping>> {
-    let client = Client::new().map_err(to_pyerr)?;
-    let mounts = client.get_manifest(mount_id).map_err(to_pyerr)?;
-
-    Ok(mounts.into_iter().map(Into::into).collect())
-}
-
 fn to_pyerr(err: crate::client::ClientError) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err.to_string())
 }
@@ -188,6 +198,7 @@ fn to_pyerr(err: crate::client::ClientError) -> PyErr {
 #[pymodule]
 fn _nuefs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Mapping>()?;
+    m.add_class::<ManifestEntry>()?;
     m.add_class::<RawHandle>()?;
     m.add_class::<OwnerInfo>()?;
     m.add_class::<DaemonInfo>()?;
@@ -198,6 +209,5 @@ fn _nuefs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_which, m)?)?;
     m.add_function(wrap_pyfunction!(_update, m)?)?;
     m.add_function(wrap_pyfunction!(_resolve, m)?)?;
-    m.add_function(wrap_pyfunction!(_get_manifest, m)?)?;
     Ok(())
 }

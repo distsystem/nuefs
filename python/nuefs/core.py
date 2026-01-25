@@ -7,7 +7,10 @@ import typing
 
 import nuefs._nuefs as _ext
 
+from nuefs.builder import ManifestBuilder
+
 Mapping = _ext.Mapping
+ManifestEntry = _ext.ManifestEntry
 OwnerInfo = _ext.OwnerInfo
 DaemonInfo = _ext.DaemonInfo
 
@@ -15,25 +18,30 @@ DaemonInfo = _ext.DaemonInfo
 class Handle:
     """Handle to a mounted NueFS filesystem."""
 
-    __slots__ = ("_root", "_mount_id")
+    __slots__ = ("_root", "_mount_id", "_mounts")
 
     def __init__(self, root: str, mount_id: int) -> None:
         self._root = root
         self._mount_id = mount_id
+        self._mounts: list[Mapping] = []
 
     @property
     def root(self) -> str:
         """Mount root path (read-only)."""
         return self._root
 
-    @property
-    def manifest(self) -> list[Mapping]:
-        """Get the current mount manifest."""
-        return _ext._get_manifest(self._mount_id)
-
     def mount(self, mounts: collections.abc.Sequence[Mapping]) -> None:
         """Set/update the mount configuration."""
-        _ext._update(self._mount_id, list(mounts))
+        self._mounts = list(mounts)
+
+        builder = ManifestBuilder(pathlib.Path(self._root))
+        builder.scan_real()
+
+        for m in mounts:
+            builder.apply_layer(m.source, str(m.target))
+
+        entries = builder.build()
+        _ext._update(self._mount_id, entries)
 
     def which(self, path: str) -> OwnerInfo | None:
         """Query which backend owns a path."""
@@ -63,7 +71,11 @@ def open(root: str | os.PathLike[str] | pathlib.Path) -> Handle:
     if mount_id is not None:
         return Handle(str(root_path), mount_id)
 
-    raw = _ext._mount(root_path, [])
+    builder = ManifestBuilder(root_path)
+    builder.scan_real()
+    entries = builder.build()
+
+    raw = _ext._mount(root_path, entries)
     return Handle(str(raw.root), raw.mount_id)
 
 

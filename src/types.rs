@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MountSpec {
-    pub target: PathBuf,
-    pub source: PathBuf,
+pub struct ManifestEntry {
+    pub virtual_path: String,
+    pub backend_path: PathBuf,
+    pub is_dir: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -29,12 +30,11 @@ pub struct DaemonInfo {
 
 #[tarpc::service]
 pub trait NuefsService {
-    async fn mount(root: PathBuf, mounts: Vec<MountSpec>) -> Result<u64, String>;
+    async fn mount(root: PathBuf, entries: Vec<ManifestEntry>) -> Result<u64, String>;
     async fn unmount(mount_id: u64) -> Result<(), String>;
     async fn which(mount_id: u64, path: String) -> Result<Option<OwnerInfoWire>, String>;
     async fn status() -> Vec<MountStatus>;
     async fn daemon_info() -> DaemonInfo;
-    async fn update(mount_id: u64, mounts: Vec<MountSpec>) -> Result<(), String>;
-    async fn get_manifest(mount_id: u64) -> Result<Vec<MountSpec>, String>;
+    async fn update(mount_id: u64, entries: Vec<ManifestEntry>) -> Result<(), String>;
     async fn resolve(root: PathBuf) -> Option<u64>;
 }

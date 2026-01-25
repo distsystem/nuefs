@@ -10,7 +10,7 @@ use tarpc::tokio_serde::formats::Bincode;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::types::{DaemonInfo, MountSpec, MountStatus, NuefsService, OwnerInfoWire};
+use crate::types::{DaemonInfo, ManifestEntry, MountStatus, NuefsService, OwnerInfoWire};
 
 use super::manager::{Manager, ManagerError};
 
@@ -48,9 +48,9 @@ impl NuefsService for NuefsServer {
         self,
         _: tarpc::context::Context,
         root: PathBuf,
-        mounts: Vec<MountSpec>,
+        entries: Vec<ManifestEntry>,
     ) -> Result<u64, String> {
-        self.manager_call(|m| m.mount(root, mounts)).await
+        self.manager_call(|m| m.mount(root, entries)).await
     }
 
     async fn unmount(self, _: tarpc::context::Context, mount_id: u64) -> Result<(), String> {
@@ -82,17 +82,9 @@ impl NuefsService for NuefsServer {
         self,
         _: tarpc::context::Context,
         mount_id: u64,
-        mounts: Vec<MountSpec>,
+        entries: Vec<ManifestEntry>,
     ) -> Result<(), String> {
-        self.manager_call(|m| m.update(mount_id, mounts)).await
-    }
-
-    async fn get_manifest(
-        self,
-        _: tarpc::context::Context,
-        mount_id: u64,
-    ) -> Result<Vec<MountSpec>, String> {
-        self.manager_call(|m| m.get_manifest(mount_id)).await
+        self.manager_call(|m| m.update(mount_id, entries)).await
     }
 
     async fn resolve(self, _: tarpc::context::Context, root: PathBuf) -> Option<u64> {
