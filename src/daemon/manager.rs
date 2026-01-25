@@ -206,7 +206,10 @@ impl Manager {
 #[derive(Clone, Debug)]
 enum Source {
     Real,
-    Layer { source_root: PathBuf, backend_path: PathBuf },
+    Layer {
+        source_root: PathBuf,
+        backend_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -243,7 +246,12 @@ impl Manifest {
         Ok(manifest)
     }
 
-    fn walk_dir<F>(&mut self, dir: &Path, prefix: &str, on_entry: &mut F) -> Result<(), ManifestError>
+    fn walk_dir<F>(
+        &mut self,
+        dir: &Path,
+        prefix: &str,
+        on_entry: &mut F,
+    ) -> Result<(), ManifestError>
     where
         F: FnMut(&mut Self, &str, &Path, bool) -> Result<(), ManifestError>,
     {
@@ -266,17 +274,21 @@ impl Manifest {
                 format!("{prefix}/{name}")
             };
 
-            let metadata = entry
-                .metadata()
-                .map_err(|e| ManifestError::Io {
-                    path: entry.path(),
-                    source: e,
-                })?;
+            let metadata = entry.metadata().map_err(|e| ManifestError::Io {
+                path: entry.path(),
+                source: e,
+            })?;
             let is_dir = metadata.is_dir();
 
             on_entry(self, &rel_path, &entry.path(), is_dir)?;
 
             if is_dir {
+                // `.git/**` is reserved at the union root. Normal operation uses gitdir
+                // indirection so `.git` becomes a file; in that case this branch won't run.
+                // If `.git` is a directory, avoid enumerating its contents.
+                if rel_path == ".git" {
+                    continue;
+                }
                 self.walk_dir(&entry.path(), &rel_path, on_entry)?;
             }
         }
@@ -285,16 +297,17 @@ impl Manifest {
     }
 
     fn scan_real(&mut self, dir: &Path) -> Result<(), ManifestError> {
-        let mut on_entry = |manifest: &mut Self, rel_path: &str, _entry_path: &Path, is_dir: bool| {
-            manifest.entries.insert(
-                rel_path.to_string(),
-                Entry {
-                    source: Source::Real,
-                    is_dir,
-                },
-            );
-            Ok(())
-        };
+        let mut on_entry =
+            |manifest: &mut Self, rel_path: &str, _entry_path: &Path, is_dir: bool| {
+                manifest.entries.insert(
+                    rel_path.to_string(),
+                    Entry {
+                        source: Source::Real,
+                        is_dir,
+                    },
+                );
+                Ok(())
+            };
         self.walk_dir(dir, "", &mut on_entry)
     }
 
@@ -311,6 +324,11 @@ impl Manifest {
     fn scan_layer(&mut self, mount: &MountSpec) -> Result<(), ManifestError> {
         let target = Self::normalize_target(&mount.target);
         let source_root = mount.source.clone();
+
+        // `.git/**` is reserved at the union root. Never import it from layers.
+        if target == ".git" || target.starts_with(".git/") {
+            return Ok(());
+        }
 
         // Handle single file mount
         if mount.source.is_file() {
@@ -494,5 +512,8 @@ impl Manifest {
 #[derive(Debug, Error)]
 pub enum ManifestError {
     #[error("IO error at {path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
