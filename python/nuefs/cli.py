@@ -7,6 +7,7 @@ from sheaves.console import console
 
 import nuefs
 
+from . import gitdir as gitdir_mod
 from .manifest import Manifest
 
 
@@ -18,6 +19,12 @@ class NueBaseCommand(Manifest, Command, app_name="nue"):
 
 class Mount(NueBaseCommand):
     def run(self) -> None:
+        git_path = self.root / ".git"
+        if git_path.exists():
+            gitdir_mod.ensure_external_gitdir(
+                self.root, gitdir_mod.default_gitdir_root()
+            )
+
         mounts = [
             nuefs.Mapping(
                 target=pathlib.Path(str(entry.target)),
