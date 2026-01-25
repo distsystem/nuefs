@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use futures::prelude::*;
 use tarpc::serde_transport;
+use tarpc::server;
 use tarpc::server::incoming;
 use tarpc::server::incoming::Incoming;
-use tarpc::server;
 use tarpc::tokio_serde::formats::Bincode;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -17,7 +17,10 @@ use super::manager::{Manager, ManagerError};
 #[derive(Debug, Error)]
 pub enum ServerError {
     #[error("failed to bind unix socket {socket}: {source}")]
-    Bind { socket: PathBuf, source: std::io::Error },
+    Bind {
+        socket: PathBuf,
+        source: std::io::Error,
+    },
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -111,13 +114,12 @@ pub async fn serve(socket_path: PathBuf) -> Result<(), ServerError> {
         started_at,
     };
 
-    let listener =
-        serde_transport::unix::listen(&socket_path, Bincode::default)
-            .await
-            .map_err(|e| ServerError::Bind {
-                socket: socket_path.clone(),
-                source: e,
-            })?;
+    let listener = serde_transport::unix::listen(&socket_path, Bincode::default)
+        .await
+        .map_err(|e| ServerError::Bind {
+            socket: socket_path.clone(),
+            source: e,
+        })?;
 
     let incoming = listener
         .filter_map(|result| async move { result.ok() })

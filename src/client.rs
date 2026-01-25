@@ -16,7 +16,10 @@ const BIN_ENV: &str = "NUEFSD_BIN";
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("failed to connect to nuefsd at {socket}: {source}")]
-    Connect { socket: PathBuf, source: std::io::Error },
+    Connect {
+        socket: PathBuf,
+        source: std::io::Error,
+    },
 
     #[error("failed to spawn nuefsd: {0}")]
     Spawn(std::io::Error),
@@ -48,14 +51,15 @@ impl Client {
             .build()?;
 
         let inner = rt.block_on(async {
-            let transport =
-                serde_transport::unix::connect(&socket_path, Bincode::default)
-                    .await
-                    .map_err(|e| ClientError::Connect {
-                        socket: socket_path.clone(),
-                        source: e,
-                    })?;
-            Ok::<_, ClientError>(NuefsServiceClient::new(client::Config::default(), transport).spawn())
+            let transport = serde_transport::unix::connect(&socket_path, Bincode::default)
+                .await
+                .map_err(|e| ClientError::Connect {
+                    socket: socket_path.clone(),
+                    source: e,
+                })?;
+            Ok::<_, ClientError>(
+                NuefsServiceClient::new(client::Config::default(), transport).spawn(),
+            )
         })?;
 
         Ok(Self { rt, inner })
@@ -65,7 +69,8 @@ impl Client {
     where
         Fut: std::future::Future<Output = Result<T, tarpc::client::RpcError>>,
     {
-        self.rt.block_on(async { Ok::<_, ClientError>(f(tarpc::context::current()).await?) })
+        self.rt
+            .block_on(async { Ok::<_, ClientError>(f(tarpc::context::current()).await?) })
     }
 
     fn call_daemon<T, Fut>(

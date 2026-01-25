@@ -4,8 +4,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
@@ -214,7 +214,8 @@ impl Filesystem for NueFs {
             return;
         }
 
-        let backend_path = option_or_reply!(self.manifest.read().resolve(&path), reply, libc::ENOENT);
+        let backend_path =
+            option_or_reply!(self.manifest.read().resolve(&path), reply, libc::ENOENT);
         let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::ENOENT);
         reply.attr(&TTL, &attr);
     }
@@ -231,7 +232,11 @@ impl Filesystem for NueFs {
 
         let mut entries = vec![
             (ino, FileType::Directory, ".".to_string()),
-            (if path.is_empty() { 1 } else { ino }, FileType::Directory, "..".to_string()),
+            (
+                if path.is_empty() { 1 } else { ino },
+                FileType::Directory,
+                "..".to_string(),
+            ),
         ];
 
         for (name, is_dir) in self.manifest.read().readdir(&path) {
@@ -387,12 +392,12 @@ impl Filesystem for NueFs {
 
         let file = io_or_reply!(
             OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(flags & libc::O_TRUNC != 0)
-            .mode(mode)
-            .open(&backend_path),
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(flags & libc::O_TRUNC != 0)
+                .mode(mode)
+                .open(&backend_path),
             reply
         );
 
@@ -409,8 +414,11 @@ impl Filesystem for NueFs {
         let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
         let child_path = join_child(&parent_path, name.as_ref());
-        let backend_path =
-            option_or_reply!(self.manifest.read().resolve(&child_path), reply, libc::ENOENT);
+        let backend_path = option_or_reply!(
+            self.manifest.read().resolve(&child_path),
+            reply,
+            libc::ENOENT
+        );
         io_or_reply!(fs::remove_file(&backend_path), reply);
         self.manifest.write().remove_entry(&child_path);
         self.notify_inval_entry(parent, &name);
@@ -449,8 +457,11 @@ impl Filesystem for NueFs {
         let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
         let child_path = join_child(&parent_path, name.as_ref());
-        let backend_path =
-            option_or_reply!(self.manifest.read().resolve(&child_path), reply, libc::ENOENT);
+        let backend_path = option_or_reply!(
+            self.manifest.read().resolve(&child_path),
+            reply,
+            libc::ENOENT
+        );
         io_or_reply!(fs::remove_dir(&backend_path), reply);
         self.manifest.write().remove_entry(&child_path);
         self.notify_inval_entry(parent, &name);
@@ -491,6 +502,10 @@ impl Filesystem for NueFs {
 
         io_or_reply!(fs::rename(&old_backend, &new_backend), reply);
         self.manifest.write().rename_entry(&old_path, &new_path);
+
+        // Refresh both the old and new parent directory entries.
+        self.notify_inval_entry(parent, name.as_ref());
+        self.notify_inval_entry(newparent, newname.as_ref());
         reply.ok();
     }
 
@@ -526,7 +541,10 @@ impl Filesystem for NueFs {
                     io_or_reply!(file.set_len(size), reply);
                 }
             } else {
-                io_or_reply!(fs::File::open(&backend_path).and_then(|f| f.set_len(size)), reply);
+                io_or_reply!(
+                    fs::File::open(&backend_path).and_then(|f| f.set_len(size)),
+                    reply
+                );
             }
         }
 

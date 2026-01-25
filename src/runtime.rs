@@ -15,4 +15,3 @@ pub fn default_socket_path() -> PathBuf {
     let uid = unsafe { libc::geteuid() };
     base.join(format!("nuefsd-{uid}.sock"))
 }
-
