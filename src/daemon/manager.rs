@@ -40,6 +40,7 @@ struct MountSession {
     real_root_fd: File,
     mounts: Vec<MountSpec>,
     manifest: Arc<RwLock<Manifest>>,
+    notifier: Arc<RwLock<Option<fuser::Notifier>>>,
     /// FUSE session handle. Dropped on unmount to trigger automatic unmount.
     #[allow(dead_code)]
     session: Option<fuser::BackgroundSession>,
@@ -86,6 +87,7 @@ impl Manager {
                 real_root_fd,
                 mounts,
                 manifest,
+                notifier,
                 session: Some(session),
             },
         );
@@ -143,17 +145,50 @@ impl Manager {
         Ok(self.mounts_by_root.get(&root).copied())
     }
 
-    pub fn update(&mut self, mount_id: u64, new_mounts: Vec<MountSpec>) -> Result<(), ManagerError> {
+    pub fn update(
+        &mut self,
+        mount_id: u64,
+        new_mounts: Vec<MountSpec>,
+    ) -> Result<(), ManagerError> {
         let session = self
             .mounts
             .get_mut(&mount_id)
             .ok_or(ManagerError::UnknownMountId(mount_id))?;
 
-        let access_root = PathBuf::from(format!("/proc/self/fd/{}", session.real_root_fd.as_raw_fd()));
+        let access_root = PathBuf::from(format!(
+            "/proc/self/fd/{}",
+            session.real_root_fd.as_raw_fd()
+        ));
         let new_manifest = Manifest::build(&session.root, &access_root, &new_mounts)?;
+
+        let old_root_children: Vec<String> = session
+            .manifest
+            .read()
+            .readdir("")
+            .into_iter()
+            .map(|(name, _is_dir)| name)
+            .collect();
+        let new_root_children: Vec<String> = new_manifest
+            .readdir("")
+            .into_iter()
+            .map(|(name, _is_dir)| name)
+            .collect();
 
         session.mounts = new_mounts;
         *session.manifest.write() = new_manifest;
+
+        if let Some(ref notifier) = *session.notifier.read() {
+            let _ = notifier.inval_inode(1, 0, 0);
+
+            // Best-effort refresh of root directory entries.
+            let mut names = old_root_children;
+            names.extend(new_root_children);
+            names.sort();
+            names.dedup();
+            for name in names {
+                let _ = notifier.inval_entry(1, std::ffi::OsStr::new(&name));
+            }
+        }
 
         Ok(())
     }
@@ -300,28 +335,32 @@ impl Manifest {
             return Ok(());
         }
 
-        let mut on_entry = |manifest: &mut Self, rel_path: &str, entry_path: &Path, is_dir: bool| {
-            let should_insert = match manifest.entries.get(rel_path) {
-                None => true,
-                Some(existing) if existing.is_dir && is_dir => false,
-                Some(_) => true,
-            };
+        let mut on_entry =
+            |manifest: &mut Self, rel_path: &str, entry_path: &Path, is_dir: bool| {
+                if rel_path == ".git" || rel_path.starts_with(".git/") {
+                    return Ok(());
+                }
+                let should_insert = match manifest.entries.get(rel_path) {
+                    None => true,
+                    Some(existing) if existing.is_dir && is_dir => false,
+                    Some(_) => true,
+                };
 
-            if should_insert {
-                manifest.entries.insert(
-                    rel_path.to_string(),
-                    Entry {
-                        source: Source::Layer {
-                            source_root: source_root.clone(),
-                            backend_path: entry_path.to_path_buf(),
+                if should_insert {
+                    manifest.entries.insert(
+                        rel_path.to_string(),
+                        Entry {
+                            source: Source::Layer {
+                                source_root: source_root.clone(),
+                                backend_path: entry_path.to_path_buf(),
+                            },
+                            is_dir,
                         },
-                        is_dir,
-                    },
-                );
-            }
+                    );
+                }
 
-            Ok(())
-        };
+                Ok(())
+            };
 
         self.walk_dir(&mount.source, &target, &mut on_entry)
     }
@@ -395,8 +434,41 @@ impl Manifest {
     pub(crate) fn rename_entry(&mut self, old_path: &str, new_path: &str) {
         let old_path = old_path.trim_start_matches('/');
         let new_path = new_path.trim_start_matches('/');
-        if let Some(entry) = self.entries.remove(old_path) {
-            self.entries.insert(new_path.to_string(), entry);
+
+        if old_path.is_empty() {
+            return;
+        }
+
+        let old_prefix = if old_path.ends_with('/') {
+            old_path.to_string()
+        } else {
+            format!("{old_path}/")
+        };
+
+        let mut to_move = Vec::new();
+        for key in self.entries.keys() {
+            if key == old_path || key.starts_with(&old_prefix) {
+                to_move.push(key.clone());
+            }
+        }
+
+        for key in to_move {
+            let Some(entry) = self.entries.remove(&key) else {
+                continue;
+            };
+
+            let new_key = if key == old_path {
+                new_path.to_string()
+            } else {
+                let suffix = key.strip_prefix(old_path).unwrap_or("");
+                if new_path.is_empty() {
+                    suffix.trim_start_matches('/').to_string()
+                } else {
+                    format!("{new_path}{suffix}")
+                }
+            };
+
+            self.entries.insert(new_key, entry);
         }
     }
 

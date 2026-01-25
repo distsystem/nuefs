@@ -178,8 +178,11 @@ impl Filesystem for NueFs {
         let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
         let child_path = join_child(&parent_path, name.as_ref());
-        let backend_path =
-            option_or_reply!(self.manifest.read().resolve(&child_path), reply, libc::ENOENT);
+        let backend_path = option_or_reply!(
+            self.manifest.read().resolve(&child_path),
+            reply,
+            libc::ENOENT
+        );
         let ino = self.get_or_create_ino(&child_path);
         let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::ENOENT);
         reply.entry(&TTL, &attr, 0);
@@ -296,12 +299,13 @@ impl Filesystem for NueFs {
 
     fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
         let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
-        let backend_path = option_or_reply!(self.manifest.read().resolve(&path), reply, libc::ENOENT);
+        let backend_path =
+            option_or_reply!(self.manifest.read().resolve(&path), reply, libc::ENOENT);
         let file = io_or_reply!(
             OpenOptions::new()
-            .read(true)
-            .write((flags & libc::O_WRONLY != 0) || (flags & libc::O_RDWR != 0))
-            .open(&backend_path),
+                .read(true)
+                .write((flags & libc::O_WRONLY != 0) || (flags & libc::O_RDWR != 0))
+                .open(&backend_path),
             reply
         );
 
