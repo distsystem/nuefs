@@ -11,7 +11,8 @@ pixi run develop  # Build and install the package
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        Python                               │
-│  handle = nuefs.open(root, mounts)                          │
+│  handle = nuefs.open(root)                                  │
+│  handle.update(entries)                                     │
 │  handle.which(path)                                         │
 │  handle.close()                                             │
 └─────────────────────────────────────────────────────────────┘
@@ -21,7 +22,7 @@ pixi run develop  # Build and install the package
 │                   Rust Extension (_nuefs.so)                │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
 │  │ #[pyclass]  │    │ IPC Client  │    │ Auto-start  │     │
-│  │ Mapping     │    │ Unix Socket │    │ nuefsd      │     │
+│  │ ManifestEntry│   │ Unix Socket │    │ nuefsd      │     │
 │  │ RawHandle   │    │ tarpc       │    │ (if needed) │     │
 │  └─────────────┘    └─────────────┘    └─────────────┘     │
 └─────────────────────────────────────────────────────────────┘

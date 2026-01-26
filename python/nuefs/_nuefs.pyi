@@ -23,14 +23,6 @@ class ManifestEntry:
     is_dir: builtins.bool
     def __new__(cls,virtual_path:builtins.str, backend_path:builtins.str | os.PathLike | pathlib.Path, is_dir:builtins.bool): ...
 
-class Mapping:
-    r"""
-    Single path mapping: source directory -> target path within mount root.
-    """
-    target: builtins.str
-    source: builtins.str
-    def __new__(cls,target:builtins.str | os.PathLike | pathlib.Path, source:builtins.str | os.PathLike | pathlib.Path): ...
-
 class OwnerInfo:
     r"""
     Information about which backend owns a path.

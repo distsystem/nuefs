@@ -13,28 +13,6 @@ use crate::client::Client;
 
 define_stub_info_gatherer!(stub_info);
 
-/// Single path mapping: source directory -> target path within mount root.
-#[gen_stub_pyclass]
-#[pyclass]
-#[derive(Clone, Debug)]
-pub struct Mapping {
-    /// Relative path within the mount root (e.g., ".config/nvim").
-    #[pyo3(get, set)]
-    pub target: PathBuf,
-    /// Absolute path to source directory.
-    #[pyo3(get, set)]
-    pub source: PathBuf,
-}
-
-#[gen_stub_pymethods]
-#[pymethods]
-impl Mapping {
-    #[new]
-    fn new(target: PathBuf, source: PathBuf) -> Self {
-        Self { target, source }
-    }
-}
-
 /// Pre-computed manifest entry for IPC.
 #[gen_stub_pyclass]
 #[pyclass]
@@ -197,7 +175,6 @@ fn to_pyerr(err: crate::client::ClientError) -> PyErr {
 
 #[pymodule]
 fn _nuefs(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<Mapping>()?;
     m.add_class::<ManifestEntry>()?;
     m.add_class::<RawHandle>()?;
     m.add_class::<OwnerInfo>()?;
