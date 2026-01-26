@@ -49,6 +49,7 @@ class Handle:
         exc_val: BaseException | None,
         exc_tb: typing.Any,
     ) -> bool:
+        self.close()
         return False
 
 
@@ -63,6 +64,23 @@ def open(root: str | os.PathLike[str] | pathlib.Path) -> Handle:
     lock = Lock.compile(root_path, ())
 
     raw = _ext._mount(root_path, lock.entries)
+    return Handle(str(raw.root), raw.mount_id)
+
+
+def mount(
+    root: str | os.PathLike[str] | pathlib.Path,
+    entries: collections.abc.Sequence[ManifestEntry],
+) -> Handle:
+    """Create a mount with entries, or update if it exists."""
+    root_path = pathlib.Path(root).expanduser().resolve()
+
+    mount_id = _ext._resolve(root_path)
+    if mount_id is not None:
+        handle = Handle(str(root_path), mount_id)
+        handle.update(entries)
+        return handle
+
+    raw = _ext._mount(root_path, list(entries))
     return Handle(str(raw.root), raw.mount_id)
 
 

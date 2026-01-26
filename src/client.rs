@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -23,6 +24,12 @@ pub enum ClientError {
 
     #[error("failed to spawn nuefsd: {0}")]
     Spawn(std::io::Error),
+
+    #[error("daemon exited immediately with {status}: {stderr}")]
+    SpawnFailed {
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
 
     #[error("daemon returned an error: {0}")]
     Daemon(String),
@@ -69,8 +76,11 @@ impl Client {
     where
         Fut: std::future::Future<Output = Result<T, tarpc::client::RpcError>>,
     {
-        self.rt
-            .block_on(async { Ok::<_, ClientError>(f(tarpc::context::current()).await?) })
+        self.rt.block_on(async {
+            let mut ctx = tarpc::context::current();
+            ctx.deadline = std::time::Instant::now() + Duration::from_secs(10);
+            Ok::<_, ClientError>(f(ctx).await?)
+        })
     }
 
     fn call_daemon<T, Fut>(
@@ -137,6 +147,27 @@ fn spawn_daemon(daemon_bin: &str, socket_path: &PathBuf) -> Result<(), ClientErr
     cmd.arg("--socket").arg(socket_path);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    cmd.spawn().map(|_| ()).map_err(ClientError::Spawn)
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(ClientError::Spawn)?;
+
+    // Give daemon a moment to fail fast (e.g., missing deps, bad args)
+    thread::sleep(Duration::from_millis(100));
+
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let stderr = child
+                .stderr
+                .take()
+                .and_then(|mut e| {
+                    let mut s = String::new();
+                    e.read_to_string(&mut s).ok()?;
+                    Some(s)
+                })
+                .unwrap_or_default();
+            Err(ClientError::SpawnFailed { status, stderr })
+        }
+        Ok(None) => Ok(()), // Still running, good
+        Err(e) => Err(ClientError::Spawn(e)),
+    }
 }

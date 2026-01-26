@@ -6,6 +6,7 @@ from nuefs.core import (
     ManifestEntry,
     OwnerInfo,
     daemon_info,
+    mount,
     open,
     status,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "ensure_external_gitdir",
     "Handle",
     "ManifestEntry",
+    "mount",
     "open",
     "OwnerInfo",
     "status",

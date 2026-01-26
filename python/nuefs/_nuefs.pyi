@@ -22,6 +22,18 @@ class ManifestEntry:
     backend_path: builtins.str
     is_dir: builtins.bool
     def __new__(cls,virtual_path:builtins.str, backend_path:builtins.str | os.PathLike | pathlib.Path, is_dir:builtins.bool): ...
+    @staticmethod
+    def _pydantic_validate(v:typing.Any) -> typing.Any:
+        ...
+
+    @staticmethod
+    def _pydantic_serialize(v:typing.Any) -> typing.Any:
+        ...
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, cls:type, _source:typing.Any, _handler:typing.Any) -> typing.Any:
+        ...
+
 
 class OwnerInfo:
     r"""

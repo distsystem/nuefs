@@ -1,6 +1,7 @@
 import os
 import pathlib
 import signal
+import subprocess
 import sys
 import time
 
@@ -15,6 +16,25 @@ from . import gitdir as gitdir_mod
 from .manifest import Manifest
 
 
+def _lazy_unmount(root: pathlib.Path) -> None:
+    for cmd in ("fusermount3", "fusermount"):
+        try:
+            subprocess.run(
+                [cmd, "-uz", str(root)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        except FileNotFoundError:
+            continue
+        except subprocess.CalledProcessError:
+            continue
+
+    msg = "failed to lazy-unmount; fusermount3/fusermount not available or mount is still busy"
+    raise RuntimeError(msg)
+
+
 class NueBaseCommand(Manifest, Command, app_name="nue"):
     @property
     def root(self) -> pathlib.Path:
@@ -23,6 +43,10 @@ class NueBaseCommand(Manifest, Command, app_name="nue"):
 
 class Mount(NueBaseCommand):
     def run(self) -> None:
+        cwd = os.getcwd()
+        root = os.fspath(self.root)
+        os.chdir("/")
+
         git_path = self.root / ".git"
         if git_path.exists():
             gitdir_mod.ensure_external_gitdir(
@@ -36,13 +60,32 @@ class Mount(NueBaseCommand):
         lock = Lock.compile(self.root, mounts)
         lock.save(self.root / "nue.lock")
 
-        with nuefs.open(self.root) as handle:
-            handle.update(lock.entries)
+        nuefs.mount(self.root, lock.entries)
+
+        if cwd == root or cwd.startswith(f"{root}{os.sep}"):
+            console.print(
+                Panel(
+                    "Mount created, but your current shell is already inside the directory.\n"
+                    "Re-enter it to see the mounted view:\n\n"
+                    f"  cd .. && cd {root}\n",
+                    title="nue mount",
+                    border_style="yellow",
+                )
+            )
 
 
 class Unmount(NueBaseCommand):
     def run(self) -> None:
-        nuefs.open(self.root).close()
+        cwd = os.getcwd()
+        root = os.fspath(self.root)
+        os.chdir("/")
+
+        # If the caller is currently inside the mountpoint, a normal unmount will be EBUSY.
+        if cwd == root or cwd.startswith(f"{root}{os.sep}"):
+            _lazy_unmount(pathlib.Path(root))
+            return
+
+        nuefs.open(pathlib.Path(root)).close()
 
 
 class Status(NueBaseCommand):
@@ -67,11 +110,34 @@ class Status(NueBaseCommand):
 
 class Stop(NueBaseCommand):
     def run(self) -> None:
+        cwd = os.getcwd()
         os.chdir("/")
 
         mounts = nuefs.status()
+        failures: list[str] = []
         for h in mounts:
-            h.close()
+            try:
+                h.close()
+            except (OSError, RuntimeError) as e:
+                try:
+                    root = pathlib.Path(h.root)
+                    root_s = os.fspath(root)
+                    if cwd == root_s or cwd.startswith(f"{root_s}{os.sep}"):
+                        _lazy_unmount(root)
+                    else:
+                        failures.append(f"{h.root}: {e}")
+                except (OSError, RuntimeError) as e2:
+                    failures.append(f"{h.root}: {e} (lazy unmount failed: {e2})")
+
+        if failures:
+            console.print(
+                Panel(
+                    "\n".join(["failed to unmount:", *failures]),
+                    title="nue stop",
+                    border_style="red",
+                )
+            )
+            raise SystemExit(1)
 
         info = nuefs.daemon_info()
         pid = int(info.pid)

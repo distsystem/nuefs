@@ -107,12 +107,25 @@ impl Manager {
 
         self.mounts_by_root.remove(&session.root);
 
-        // Use lazy unmount to avoid blocking when processes are using the mount.
+        // Use lazy unmount with timeout to avoid blocking indefinitely.
         // fusermount3 -u -z does MNT_DETACH which detaches immediately.
-        let _ = std::process::Command::new("fusermount3")
+        let mut child = std::process::Command::new("fusermount3")
             .args(["-u", "-z"])
             .arg(&session.root)
-            .status();
+            .spawn()
+            .ok();
+
+        if let Some(ref mut child) = child {
+            // Wait up to 5 seconds for fusermount3
+            for _ in 0..50 {
+                if let Ok(Some(_)) = child.try_wait() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            // If still running, kill it
+            let _ = child.kill();
+        }
 
         // Drop session after unmount command.
         drop(session);
@@ -224,12 +237,17 @@ impl Manifest {
     ) -> Self {
         let mut map = HashMap::new();
         for e in entries {
+            let source = if e.backend_path.starts_with(&display_root) {
+                Source::Real
+            } else {
+                Source::Layer {
+                    backend_path: e.backend_path,
+                }
+            };
             map.insert(
                 e.virtual_path,
                 Entry {
-                    source: Source::Layer {
-                        backend_path: e.backend_path,
-                    },
+                    source,
                     is_dir: e.is_dir,
                 },
             );
