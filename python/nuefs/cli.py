@@ -1,5 +1,8 @@
+import os
 import pathlib
+import signal
 import sys
+import time
 
 from rich.panel import Panel
 from sheaves.cli import Command, cli
@@ -43,7 +46,6 @@ class Unmount(NueBaseCommand):
 
 class Status(NueBaseCommand):
     def run(self) -> None:
-        import time
         import humanize
 
         info = nuefs.daemon_info()
@@ -62,8 +64,42 @@ class Status(NueBaseCommand):
         console.print(Panel("\n".join(lines), title="nuefsd", border_style="dim"))
 
 
+class Stop(NueBaseCommand):
+    def run(self) -> None:
+        os.chdir("/")
+
+        mounts = nuefs.status()
+        for h in mounts:
+            h.close()
+
+        info = nuefs.daemon_info()
+        pid = int(info.pid)
+
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+
+        for _ in range(40):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        try:
+            pathlib.Path(str(info.socket)).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def main() -> int:
-    cli(Mount | Unmount | Status).run()
+    cli(Mount | Unmount | Status | Stop).run()
     return 0
 
 

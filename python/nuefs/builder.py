@@ -30,9 +30,8 @@ class ManifestBuilder:
         """Apply a mount layer."""
         source = source.resolve()
 
-        # Skip .git at union root
-        if target == ".git" or target.startswith(".git/"):
-            return
+        # Auto-enable git inclusion when explicitly mounting .git
+        include_git = target == ".git" or target.startswith(".git/")
 
         # Single file mount
         if source.is_file():
@@ -47,8 +46,18 @@ class ManifestBuilder:
         if not source.exists():
             return
 
+        # Add target directory entry when mounting to non-root
+        if target != ".":
+            if target not in self.entries or not self.entries[target].is_dir:
+                self.entries[target] = _ext.ManifestEntry(
+                    virtual_path=target,
+                    backend_path=source,
+                    is_dir=True,
+                )
+
         for path in source.rglob("*"):
-            if ".git" in path.parts:
+            # Skip .git unless include_git or target is .git itself
+            if not include_git and ".git" in path.parts:
                 continue
             rel = path.relative_to(source)
             if target == ".":
@@ -56,8 +65,8 @@ class ManifestBuilder:
             else:
                 virtual = str(pathlib.PurePosixPath(target) / rel)
 
-            # Skip .git at union root
-            if virtual == ".git" or virtual.startswith(".git/"):
+            # Skip .git at union root unless explicitly requested
+            if not include_git and (virtual == ".git" or virtual.startswith(".git/")):
                 continue
 
             # Merge rule: directories don't override directories
