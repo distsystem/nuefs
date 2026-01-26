@@ -7,7 +7,7 @@ import typing
 
 import nuefs._nuefs as _ext
 
-from nuefs.builder import ManifestBuilder
+from nuefs.lockfile import Lock
 
 ManifestEntry = _ext.ManifestEntry
 OwnerInfo = _ext.OwnerInfo
@@ -60,11 +60,9 @@ def open(root: str | os.PathLike[str] | pathlib.Path) -> Handle:
     if mount_id is not None:
         return Handle(str(root_path), mount_id)
 
-    builder = ManifestBuilder(root_path)
-    builder.scan_real()
-    entries = builder.build()
+    lock = Lock.compile(root_path, ())
 
-    raw = _ext._mount(root_path, entries)
+    raw = _ext._mount(root_path, lock.entries)
     return Handle(str(raw.root), raw.mount_id)
 
 

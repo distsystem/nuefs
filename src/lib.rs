@@ -6,6 +6,8 @@ mod types;
 use std::path::PathBuf;
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use pyo3::types::PyType;
 use pyo3_stub_gen::define_stub_info_gatherer;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
@@ -39,6 +41,92 @@ impl ManifestEntry {
             backend_path,
             is_dir,
         }
+    }
+
+    #[staticmethod]
+    fn _pydantic_validate(py: Python<'_>, v: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        if v.extract::<PyRef<'_, Self>>().is_ok() {
+            return Ok(v.clone().unbind());
+        }
+
+        let Ok(dict) = v.downcast::<PyDict>() else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "ManifestEntry or dict required",
+            ));
+        };
+
+        let Some(virtual_path) = dict.get_item("virtual_path")? else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "missing key: virtual_path",
+            ));
+        };
+        let Some(backend_path) = dict.get_item("backend_path")? else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "missing key: backend_path",
+            ));
+        };
+        let Some(is_dir) = dict.get_item("is_dir")? else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "missing key: is_dir",
+            ));
+        };
+
+        let virtual_path = virtual_path.extract::<String>()?;
+        let backend_path = backend_path.extract::<PathBuf>()?;
+        let is_dir = is_dir.extract::<bool>()?;
+
+        let obj = Py::new(
+            py,
+            Self {
+                virtual_path,
+                backend_path,
+                is_dir,
+            },
+        )?;
+        Ok(obj.bind(py).clone().into_any().unbind())
+    }
+
+    #[staticmethod]
+    fn _pydantic_serialize(py: Python<'_>, v: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        let entry = v.extract::<PyRef<'_, Self>>()?;
+        let dict = PyDict::new(py);
+        dict.set_item("virtual_path", &entry.virtual_path)?;
+        dict.set_item(
+            "backend_path",
+            entry.backend_path.as_path().to_string_lossy().as_ref(),
+        )?;
+        dict.set_item("is_dir", entry.is_dir)?;
+        Ok(dict.into_any().unbind())
+    }
+
+    #[classmethod]
+    fn __get_pydantic_core_schema__(
+        cls: &Bound<'_, PyType>,
+        _source: &Bound<'_, PyAny>,
+        _handler: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObject> {
+        let py = cls.py();
+
+        let core_schema = py.import("pydantic_core.core_schema")?;
+
+        let is_instance_schema = core_schema
+            .getattr("is_instance_schema")?
+            .call1((cls,))?;
+
+        let validate = cls.getattr("_pydantic_validate")?;
+        let serialize = cls.getattr("_pydantic_serialize")?;
+
+        let serialization = core_schema
+            .getattr("plain_serializer_function_ser_schema")?
+            .call1((serialize,))?;
+
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("serialization", serialization)?;
+
+        Ok(core_schema
+            .getattr("no_info_before_validator_function")?
+            .call((validate, is_instance_schema), Some(&kwargs))?
+            .unbind())
     }
 }
 

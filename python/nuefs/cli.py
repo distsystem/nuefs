@@ -9,7 +9,7 @@ from sheaves.cli import Command, cli
 from sheaves.console import console
 
 import nuefs
-from nuefs.builder import ManifestBuilder
+from nuefs.lockfile import Lock
 
 from . import gitdir as gitdir_mod
 from .manifest import Manifest
@@ -29,17 +29,15 @@ class Mount(NueBaseCommand):
                 self.root, gitdir_mod.default_gitdir_root()
             )
 
-        builder = ManifestBuilder(self.root)
-        builder.scan_real()
-        for entry in self.mounts:
-            builder.apply_layer(
-                pathlib.Path(str(entry.source)).expanduser(),
-                str(entry.target),
-            )
+        mounts = [
+            (pathlib.Path(str(entry.source)).expanduser(), str(entry.target))
+            for entry in self.mounts
+        ]
+        lock = Lock.compile(self.root, mounts)
+        lock.save(self.root / "nue.lock")
 
-        entries = builder.build()
         with nuefs.open(self.root) as handle:
-            handle.update(entries)
+            handle.update(lock.entries)
 
 
 class Unmount(NueBaseCommand):
