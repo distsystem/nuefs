@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use thiserror::Error;
+use tracing::{debug, info, warn};
 
 use crate::types::{ManifestEntry, MountStatus, OwnerInfoWire};
 
@@ -56,11 +57,13 @@ impl Manager {
         root: PathBuf,
         entries: Vec<ManifestEntry>,
     ) -> Result<u64, ManagerError> {
+        let entry_count = entries.len();
         let root = root
             .canonicalize()
             .map_err(|e| ManagerError::InvalidRoot(e.to_string()))?;
 
         if self.mounts_by_root.contains_key(&root) {
+            warn!(root = %root.display(), "mount rejected: already mounted");
             return Err(ManagerError::AlreadyMounted(root));
         }
 
@@ -94,8 +97,14 @@ impl Manager {
                 session: Some(session),
             },
         );
-        self.mounts_by_root.insert(root, mount_id);
+        self.mounts_by_root.insert(root.clone(), mount_id);
 
+        info!(
+            mount_id,
+            root = %root.display(),
+            entries = entry_count,
+            "FUSE session mounted"
+        );
         Ok(mount_id)
     }
 
@@ -105,13 +114,16 @@ impl Manager {
             .remove(&mount_id)
             .ok_or(ManagerError::UnknownMountId(mount_id))?;
 
-        self.mounts_by_root.remove(&session.root);
+        let root = session.root.clone();
+        self.mounts_by_root.remove(&root);
+
+        debug!(mount_id, root = %root.display(), "unmounting FUSE session");
 
         // Use lazy unmount with timeout to avoid blocking indefinitely.
         // fusermount3 -u -z does MNT_DETACH which detaches immediately.
         let mut child = std::process::Command::new("fusermount3")
             .args(["-u", "-z"])
-            .arg(&session.root)
+            .arg(&root)
             .spawn()
             .ok();
 
@@ -130,6 +142,7 @@ impl Manager {
         // Drop session after unmount command.
         drop(session);
 
+        info!(mount_id, root = %root.display(), "FUSE session unmounted");
         Ok(())
     }
 
@@ -166,6 +179,7 @@ impl Manager {
         mount_id: u64,
         entries: Vec<ManifestEntry>,
     ) -> Result<(), ManagerError> {
+        let entry_count = entries.len();
         let session = self
             .mounts
             .get_mut(&mount_id)
@@ -205,6 +219,12 @@ impl Manager {
             }
         }
 
+        debug!(
+            mount_id,
+            entries = entry_count,
+            root = %session.root.display(),
+            "manifest updated"
+        );
         Ok(())
     }
 }

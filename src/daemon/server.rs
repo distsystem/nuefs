@@ -9,6 +9,7 @@ use tarpc::server::incoming::Incoming;
 use tarpc::tokio_serde::formats::Bincode;
 use thiserror::Error;
 use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 
 use crate::types::{DaemonInfo, ManifestEntry, MountStatus, NuefsService, OwnerInfoWire};
 
@@ -50,11 +51,24 @@ impl NuefsService for NuefsServer {
         root: PathBuf,
         entries: Vec<ManifestEntry>,
     ) -> Result<u64, String> {
-        self.manager_call(|m| m.mount(root, entries)).await
+        let entry_count = entries.len();
+        info!(root = %root.display(), entries = entry_count, "RPC mount");
+        let result = self.manager_call(|m| m.mount(root, entries)).await;
+        match &result {
+            Ok(mount_id) => info!(mount_id, "mount succeeded"),
+            Err(e) => warn!(error = %e, "mount failed"),
+        }
+        result
     }
 
     async fn unmount(self, _: tarpc::context::Context, mount_id: u64) -> Result<(), String> {
-        self.manager_call(|m| m.unmount(mount_id)).await
+        info!(mount_id, "RPC unmount");
+        let result = self.manager_call(|m| m.unmount(mount_id)).await;
+        match &result {
+            Ok(()) => info!(mount_id, "unmount succeeded"),
+            Err(e) => warn!(mount_id, error = %e, "unmount failed"),
+        }
+        result
     }
 
     async fn which(
@@ -63,14 +77,17 @@ impl NuefsService for NuefsServer {
         mount_id: u64,
         path: String,
     ) -> Result<Option<OwnerInfoWire>, String> {
+        debug!(mount_id, path = %path, "RPC which");
         self.manager_call(|m| m.which(mount_id, &path)).await
     }
 
     async fn status(self, _: tarpc::context::Context) -> Vec<MountStatus> {
+        debug!("RPC status");
         self.manager.lock().await.status()
     }
 
     async fn daemon_info(self, _: tarpc::context::Context) -> DaemonInfo {
+        debug!("RPC daemon_info");
         DaemonInfo {
             pid: std::process::id(),
             socket: self.socket_path.clone(),
@@ -84,10 +101,18 @@ impl NuefsService for NuefsServer {
         mount_id: u64,
         entries: Vec<ManifestEntry>,
     ) -> Result<(), String> {
-        self.manager_call(|m| m.update(mount_id, entries)).await
+        let entry_count = entries.len();
+        info!(mount_id, entries = entry_count, "RPC update");
+        let result = self.manager_call(|m| m.update(mount_id, entries)).await;
+        match &result {
+            Ok(()) => info!(mount_id, "update succeeded"),
+            Err(e) => warn!(mount_id, error = %e, "update failed"),
+        }
+        result
     }
 
     async fn resolve(self, _: tarpc::context::Context, root: PathBuf) -> Option<u64> {
+        debug!(root = %root.display(), "RPC resolve");
         self.manager_call(|m| m.resolve(root)).await.ok().flatten()
     }
 }
@@ -112,6 +137,8 @@ pub async fn serve(socket_path: PathBuf) -> Result<(), ServerError> {
             socket: socket_path.clone(),
             source: e,
         })?;
+
+    info!(socket = %socket_path.display(), "server listening");
 
     let incoming = listener
         .filter_map(|result| async move { result.ok() })

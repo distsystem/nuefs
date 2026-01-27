@@ -1,0 +1,8 @@
+apiVersion: nue/v1
+mounts:
+- source: ./sources/base
+  target: .
+- source: ./sources/override
+  target: .
+  config:
+    create_policy: last

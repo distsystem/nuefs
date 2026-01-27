@@ -13,6 +13,7 @@ use fuser::{
     ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
 use parking_lot::RwLock;
+use tracing::trace;
 
 use super::manager::Manifest;
 
@@ -178,6 +179,7 @@ impl Filesystem for NueFs {
         let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
         let child_path = join_child(&parent_path, name.as_ref());
+        trace!(parent, name = %name, path = %child_path, "FUSE lookup");
         let backend_path = option_or_reply!(
             self.manifest.read().resolve(&child_path),
             reply,
@@ -190,6 +192,7 @@ impl Filesystem for NueFs {
 
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
+        trace!(ino, path = %path, "FUSE getattr");
 
         if path.is_empty() {
             let now = SystemTime::now();
@@ -229,6 +232,7 @@ impl Filesystem for NueFs {
         mut reply: ReplyDirectory,
     ) {
         let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
+        trace!(ino, path = %path, offset, "FUSE readdir");
 
         let mut entries = vec![
             (ino, FileType::Directory, ".".to_string()),
@@ -304,6 +308,7 @@ impl Filesystem for NueFs {
 
     fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
         let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
+        trace!(ino, path = %path, flags, "FUSE open");
         let backend_path =
             option_or_reply!(self.manifest.read().resolve(&path), reply, libc::ENOENT);
         let file = io_or_reply!(
@@ -321,7 +326,7 @@ impl Filesystem for NueFs {
     fn read(
         &mut self,
         _req: &Request,
-        _ino: u64,
+        ino: u64,
         fh: u64,
         offset: i64,
         size: u32,
@@ -329,6 +334,7 @@ impl Filesystem for NueFs {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
+        trace!(ino, fh, offset, size, "FUSE read");
         let mut file = option_or_reply!(self.get_file(fh), reply, libc::EBADF);
         io_or_reply!(file.seek(SeekFrom::Start(offset as u64)), reply);
 
@@ -340,7 +346,7 @@ impl Filesystem for NueFs {
     fn write(
         &mut self,
         _req: &Request,
-        _ino: u64,
+        ino: u64,
         fh: u64,
         offset: i64,
         data: &[u8],
@@ -349,6 +355,7 @@ impl Filesystem for NueFs {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
+        trace!(ino, fh, offset, size = data.len(), "FUSE write");
         let mut handles = self.handles.write();
         let file = option_or_reply!(handles.get_mut(&fh), reply, libc::EBADF);
         io_or_reply!(file.seek(SeekFrom::Start(offset as u64)), reply);
@@ -383,6 +390,7 @@ impl Filesystem for NueFs {
         let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
         let child_path = join_child(&parent_path, name.as_ref());
+        trace!(parent, name = %name, path = %child_path, mode, "FUSE create");
         let target_dir = self.manifest.read().create_target(&parent_path);
         let backend_path = target_dir.join(&*name);
 
@@ -414,6 +422,7 @@ impl Filesystem for NueFs {
         let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
         let child_path = join_child(&parent_path, name.as_ref());
+        trace!(parent, name = %name, path = %child_path, "FUSE unlink");
         let backend_path = option_or_reply!(
             self.manifest.read().resolve(&child_path),
             reply,
@@ -437,6 +446,7 @@ impl Filesystem for NueFs {
         let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
         let child_path = join_child(&parent_path, name.as_ref());
+        trace!(parent, name = %name, path = %child_path, mode, "FUSE mkdir");
         let target_dir = self.manifest.read().create_target(&parent_path);
         let backend_path = target_dir.join(&*name);
 
@@ -457,6 +467,7 @@ impl Filesystem for NueFs {
         let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
         let name = name.to_string_lossy();
         let child_path = join_child(&parent_path, name.as_ref());
+        trace!(parent, name = %name, path = %child_path, "FUSE rmdir");
         let backend_path = option_or_reply!(
             self.manifest.read().resolve(&child_path),
             reply,
@@ -486,6 +497,7 @@ impl Filesystem for NueFs {
 
         let old_path = join_child(&parent_path, name.as_ref());
         let new_path = join_child(&newparent_path, newname.as_ref());
+        trace!(old = %old_path, new = %new_path, "FUSE rename");
 
         let (old_backend, new_backend) = {
             let manifest = self.manifest.read();
@@ -528,6 +540,7 @@ impl Filesystem for NueFs {
         reply: ReplyAttr,
     ) {
         let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
+        trace!(ino, path = %path, ?mode, ?size, "FUSE setattr");
 
         let backend_path = if path.is_empty() {
             self.real_root.clone()

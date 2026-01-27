@@ -18,6 +18,8 @@ serde = { version = "1", features = ["derive"] }
 tarpc = { version = "0.35", features = ["tokio1", "serde-transport-bincode", "unix"] }
 tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "macros"] }
 futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[bin]]
 name = "nuefsd"
