@@ -91,6 +91,14 @@ def setup_workspace(fixture: str = "nue.yaml") -> Path:
 
     shutil.copy(fixture_path, workspace / "nue.yaml")
 
+    # The fixture manifests use ./sources/*, but this helper creates sources as a
+    # sibling of workspace (../sources/*). Rewrite sources so `nue mount` works
+    # out of the box.
+    manifest_path = workspace / "nue.yaml"
+    manifest_text = manifest_path.read_text()
+    manifest_text = manifest_text.replace("source: ./sources/", "source: ../sources/")
+    manifest_path.write_text(manifest_text)
+
     return workspace
 
 

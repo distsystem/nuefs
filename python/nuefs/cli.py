@@ -45,7 +45,6 @@ class Mount(NueBaseCommand):
     def run(self) -> None:
         cwd = os.getcwd()
         root = os.fspath(self.root)
-        os.chdir("/")
 
         git_path = self.root / ".git"
         if git_path.exists():
@@ -53,12 +52,16 @@ class Mount(NueBaseCommand):
                 self.root, gitdir_mod.default_gitdir_root()
             )
 
-        mounts = [
-            (pathlib.Path(str(entry.source)).expanduser(), str(entry.target))
-            for entry in self.mounts
-        ]
+        mounts = []
+        for entry in self.mounts:
+            source = pathlib.Path(str(entry.source)).expanduser()
+            if not source.is_absolute():
+                source = (self.root / source).resolve()
+            mounts.append((source, str(entry.target)))
         lock = Lock.compile(self.root, mounts)
         lock.save(self.root / "nue.lock")
+
+        os.chdir("/")
 
         nuefs.mount(self.root, lock.entries)
 

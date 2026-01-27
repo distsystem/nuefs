@@ -4,6 +4,8 @@ use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use easy_fuser::prelude::BackgroundSession;
+use easy_fuser::prelude::MountOption;
 use parking_lot::RwLock;
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -40,7 +42,7 @@ struct MountSession {
     notifier: Arc<RwLock<Option<fuser::Notifier>>>,
     /// FUSE session handle. Dropped on unmount to trigger automatic unmount.
     #[allow(dead_code)]
-    session: Option<fuser::BackgroundSession>,
+    session: Option<BackgroundSession>,
 }
 
 impl Manager {
@@ -75,14 +77,15 @@ impl Manager {
             access_root.clone(),
             entries,
         )));
-        let notifier = Arc::new(RwLock::new(None));
-        let fs = NueFs::new(access_root, manifest.clone(), notifier.clone());
+        let fs = NueFs::new(access_root, manifest.clone());
 
-        let options = vec![fuser::MountOption::FSName("nuefs".to_string())];
-        let session = fuser::spawn_mount2(fs, &root, &options)?;
+        let options = vec![MountOption::FSName("nuefs".to_string())];
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let session = easy_fuser::spawn_mount::<PathBuf, _, _>(fs, &root, &options, threads)?;
 
-        // Set notifier after session is created
-        *notifier.write() = Some(session.notifier());
+        let notifier = Arc::new(RwLock::new(Some(session.notifier())));
 
         let mount_id = self.next_mount_id;
         self.next_mount_id += 1;
@@ -328,13 +331,26 @@ impl Manifest {
 
     pub(crate) fn add_entry(&mut self, path: &str, is_dir: bool) {
         let path = path.trim_start_matches('/');
-        self.entries.insert(
-            path.to_string(),
-            Entry {
-                source: Source::Real,
-                is_dir,
-            },
-        );
+        let backend_path = self.access_root.join(path);
+        self.add_entry_with_backend(path, backend_path, is_dir);
+    }
+
+    pub(crate) fn add_entry_with_backend(
+        &mut self,
+        path: &str,
+        backend_path: PathBuf,
+        is_dir: bool,
+    ) {
+        let path = path.trim_start_matches('/');
+
+        let source = if backend_path.starts_with(&self.access_root) {
+            Source::Real
+        } else {
+            Source::Layer { backend_path }
+        };
+
+        self.entries
+            .insert(path.to_string(), Entry { source, is_dir });
     }
 
     pub(crate) fn remove_entry(&mut self, path: &str) {
@@ -342,7 +358,13 @@ impl Manifest {
         self.entries.remove(path);
     }
 
-    pub(crate) fn rename_entry(&mut self, old_path: &str, new_path: &str) {
+    pub(crate) fn rename_entry_with_backend(
+        &mut self,
+        old_path: &str,
+        new_path: &str,
+        old_backend: &PathBuf,
+        new_backend: &PathBuf,
+    ) {
         let old_path = old_path.trim_start_matches('/');
         let new_path = new_path.trim_start_matches('/');
 
@@ -377,6 +399,31 @@ impl Manifest {
                 } else {
                     format!("{new_path}{suffix}")
                 }
+            };
+
+            let entry = match entry.source {
+                Source::Layer { backend_path } => {
+                    // If this entry came from the renamed backend, update its backend path too.
+                    let updated = backend_path
+                        .strip_prefix(old_backend)
+                        .ok()
+                        .map(|suffix| {
+                            if suffix.as_os_str().is_empty() {
+                                new_backend.clone()
+                            } else {
+                                new_backend.join(suffix)
+                            }
+                        })
+                        .unwrap_or(backend_path);
+
+                    Entry {
+                        source: Source::Layer {
+                            backend_path: updated,
+                        },
+                        is_dir: entry.is_dir,
+                    }
+                }
+                Source::Real => entry,
             };
 
             self.entries.insert(new_key, entry);

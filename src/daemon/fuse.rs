@@ -1,578 +1,347 @@
-use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::PathBuf;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use fuser::{
-    FileAttr, FileType, Filesystem, Notifier, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
-    ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
-};
+use easy_fuser::prelude::*;
+use easy_fuser::templates::fd_handler_helper::FdHandlerHelper;
+use easy_fuser::templates::DefaultFuseHandler;
+use easy_fuser::types::errors::{ErrorKind, PosixError};
+use easy_fuser::unix_fs;
 use parking_lot::RwLock;
-use tracing::trace;
+use tracing::{debug, trace};
 
 use super::manager::Manifest;
 
-const TTL: Duration = Duration::from_secs(1);
-
-fn io_errno(err: &std::io::Error) -> i32 {
-    err.raw_os_error().unwrap_or(libc::EIO)
-}
-
-fn join_child(parent: &str, name: &str) -> String {
-    if parent.is_empty() {
-        name.to_string()
-    } else {
-        format!("{parent}/{name}")
-    }
-}
-
-macro_rules! option_or_reply {
-    ($opt:expr, $reply:expr, $errno:expr) => {
-        match $opt {
-            Some(v) => v,
-            None => {
-                $reply.error($errno);
-                return;
-            }
-        }
-    };
-}
-
-macro_rules! io_or_reply {
-    ($res:expr, $reply:expr) => {
-        match $res {
-            Ok(v) => v,
-            Err(e) => {
-                $reply.error(io_errno(&e));
-                return;
-            }
-        }
-    };
-}
-
-/// FUSE layered filesystem.
 pub(crate) struct NueFs {
     real_root: PathBuf,
     manifest: Arc<RwLock<Manifest>>,
-    inodes: RwLock<HashMap<u64, String>>,
-    paths: RwLock<HashMap<String, u64>>,
-    next_ino: AtomicU64,
-    handles: RwLock<HashMap<u64, File>>,
-    next_fh: AtomicU64,
-    notifier: Arc<RwLock<Option<Notifier>>>,
+    inner: FdHandlerHelper<DefaultFuseHandler>,
 }
 
 impl NueFs {
-    pub(crate) fn new(
-        real_root: PathBuf,
-        manifest: Arc<RwLock<Manifest>>,
-        notifier: Arc<RwLock<Option<Notifier>>>,
-    ) -> Self {
-        let mut inodes = HashMap::new();
-        let mut paths = HashMap::new();
-
-        inodes.insert(1, String::new());
-        paths.insert(String::new(), 1);
-
+    pub(crate) fn new(real_root: PathBuf, manifest: Arc<RwLock<Manifest>>) -> Self {
         Self {
             real_root,
             manifest,
-            inodes: RwLock::new(inodes),
-            paths: RwLock::new(paths),
-            next_ino: AtomicU64::new(2),
-            handles: RwLock::new(HashMap::new()),
-            next_fh: AtomicU64::new(1),
-            notifier,
+            inner: FdHandlerHelper::new(DefaultFuseHandler::new()),
         }
     }
 
-    /// Notify kernel of entry invalidation (triggers inotify)
-    fn notify_inval_entry(&self, parent_ino: u64, name: &str) {
-        if let Some(ref notifier) = *self.notifier.read() {
-            let _ = notifier.inval_entry(parent_ino, std::ffi::OsStr::new(name));
-        }
-    }
-
-    fn get_or_create_ino(&self, path: &str) -> u64 {
-        let paths = self.paths.read();
-        if let Some(&ino) = paths.get(path) {
-            return ino;
-        }
-        drop(paths);
-
-        let mut paths = self.paths.write();
-        let mut inodes = self.inodes.write();
-
-        if let Some(&ino) = paths.get(path) {
-            return ino;
-        }
-
-        let ino = self.next_ino.fetch_add(1, Ordering::SeqCst);
-        paths.insert(path.to_string(), ino);
-        inodes.insert(ino, path.to_string());
-        ino
-    }
-
-    fn get_path(&self, ino: u64) -> Option<String> {
-        self.inodes.read().get(&ino).cloned()
-    }
-
-    fn get_attr(&self, ino: u64, backend_path: &PathBuf) -> Option<FileAttr> {
-        let metadata = fs::metadata(backend_path).ok()?;
-
-        let kind = if metadata.is_dir() {
-            FileType::Directory
-        } else if metadata.is_symlink() {
-            FileType::Symlink
+    fn display_path(path: &Path) -> String {
+        if path.as_os_str().is_empty() {
+            "/".to_string()
         } else {
-            FileType::RegularFile
-        };
-
-        let atime = metadata.accessed().unwrap_or(UNIX_EPOCH);
-        let mtime = metadata.modified().unwrap_or(UNIX_EPOCH);
-        let ctime = SystemTime::UNIX_EPOCH + Duration::from_secs(metadata.ctime() as u64);
-
-        Some(FileAttr {
-            ino,
-            size: metadata.len(),
-            blocks: metadata.blocks(),
-            atime,
-            mtime,
-            ctime,
-            crtime: ctime,
-            kind,
-            perm: (metadata.mode() & 0o7777) as u16,
-            nlink: metadata.nlink() as u32,
-            uid: metadata.uid(),
-            gid: metadata.gid(),
-            rdev: metadata.rdev() as u32,
-            blksize: metadata.blksize() as u32,
-            flags: 0,
-        })
+            path.to_string_lossy().to_string()
+        }
     }
 
-    fn alloc_fh(&self, file: File) -> u64 {
-        let fh = self.next_fh.fetch_add(1, Ordering::SeqCst);
-        self.handles.write().insert(fh, file);
-        fh
+    fn to_rel_string(path: &Path) -> String {
+        path.to_string_lossy().trim_start_matches('/').to_string()
     }
 
-    fn get_file(&self, fh: u64) -> Option<File> {
-        self.handles
-            .read()
-            .get(&fh)
-            .and_then(|f| f.try_clone().ok())
+    fn join_child(parent: &Path, name: &OsStr) -> PathBuf {
+        if parent.as_os_str().is_empty() {
+            PathBuf::from(name)
+        } else {
+            parent.join(name)
+        }
     }
 
-    fn release_fh(&self, fh: u64) {
-        self.handles.write().remove(&fh);
+    fn resolve_backend(&self, path: &Path) -> Option<PathBuf> {
+        if path.as_os_str().is_empty() {
+            Some(self.real_root.clone())
+        } else {
+            self.manifest.read().resolve(&Self::to_rel_string(path))
+        }
+    }
+
+    fn parent_path(path: &Path) -> PathBuf {
+        path.parent().map_or_else(PathBuf::new, Path::to_path_buf)
+    }
+
+    fn with_ttl(&self, mut attr: FileAttribute) -> FileAttribute {
+        if attr.ttl.is_none() {
+            attr.ttl = Some(self.get_default_ttl());
+        }
+        attr
+    }
+
+    fn file_not_found(path: &Path) -> PosixError {
+        ErrorKind::FileNotFound.to_error(&format!("{}: not found", Self::display_path(path)))
+    }
+
+    fn bad_file_handle() -> PosixError {
+        ErrorKind::BadFileDescriptor.to_error("bad file handle")
     }
 }
 
-impl Filesystem for NueFs {
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
-        let name = name.to_string_lossy();
-        let child_path = join_child(&parent_path, name.as_ref());
-        trace!(parent, name = %name, path = %child_path, "FUSE lookup");
-        let backend_path = option_or_reply!(
-            self.manifest.read().resolve(&child_path),
-            reply,
-            libc::ENOENT
-        );
-        let ino = self.get_or_create_ino(&child_path);
-        let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::ENOENT);
-        reply.entry(&TTL, &attr, 0);
+impl FuseHandler<PathBuf> for NueFs {
+    fn get_inner(&self) -> &dyn FuseHandler<PathBuf> {
+        &self.inner
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
-        trace!(ino, path = %path, "FUSE getattr");
+    fn lookup(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<FileAttribute> {
+        let child_path = Self::join_child(&parent_id, name);
+        trace!(
+            parent = %Self::display_path(&parent_id),
+            name = %name.to_string_lossy(),
+            path = %Self::display_path(&child_path),
+            "FUSE lookup"
+        );
+        let backend_path = self
+            .manifest
+            .read()
+            .resolve(&Self::to_rel_string(&child_path))
+            .ok_or_else(|| Self::file_not_found(&child_path))?;
+        let attr = unix_fs::lookup(&backend_path)?;
+        Ok(self.with_ttl(attr))
+    }
 
-        if path.is_empty() {
-            let now = SystemTime::now();
-            let attr = FileAttr {
-                ino: 1,
-                size: 0,
-                blocks: 0,
-                atime: now,
-                mtime: now,
-                ctime: now,
-                crtime: now,
-                kind: FileType::Directory,
-                perm: 0o755,
-                nlink: 2,
-                uid: unsafe { libc::getuid() },
-                gid: unsafe { libc::getgid() },
-                rdev: 0,
-                blksize: 512,
-                flags: 0,
-            };
-            reply.attr(&TTL, &attr);
-            return;
-        }
-
-        let backend_path =
-            option_or_reply!(self.manifest.read().resolve(&path), reply, libc::ENOENT);
-        let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::ENOENT);
-        reply.attr(&TTL, &attr);
+    fn getattr(
+        &self,
+        _req: &RequestInfo,
+        file_id: PathBuf,
+        _file_handle: Option<BorrowedFileHandle<'_>>,
+    ) -> FuseResult<FileAttribute> {
+        trace!(path = %Self::display_path(&file_id), "FUSE getattr");
+        let backend_path = self
+            .resolve_backend(&file_id)
+            .ok_or_else(|| Self::file_not_found(&file_id))?;
+        let attr = unix_fs::lookup(&backend_path)?;
+        Ok(self.with_ttl(attr))
     }
 
     fn readdir(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        mut reply: ReplyDirectory,
-    ) {
-        let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
-        trace!(ino, path = %path, offset, "FUSE readdir");
+        &self,
+        _req: &RequestInfo,
+        file_id: PathBuf,
+        _file_handle: BorrowedFileHandle<'_>,
+    ) -> FuseResult<Vec<(OsString, FileKind)>> {
+        trace!(path = %Self::display_path(&file_id), "FUSE readdir");
+        let rel_path = Self::to_rel_string(&file_id);
+        let mut entries: Vec<(OsString, FileKind)> = Vec::new();
+        entries.push((".".into(), FileKind::Directory));
+        entries.push(("..".into(), FileKind::Directory));
 
-        let mut entries = vec![
-            (ino, FileType::Directory, ".".to_string()),
-            (
-                if path.is_empty() { 1 } else { ino },
-                FileType::Directory,
-                "..".to_string(),
-            ),
-        ];
-
-        for (name, is_dir) in self.manifest.read().readdir(&path) {
-            let child_path = join_child(&path, &name);
-            let child_ino = self.get_or_create_ino(&child_path);
+        for (name, is_dir) in self.manifest.read().readdir(&rel_path) {
             let kind = if is_dir {
-                FileType::Directory
+                FileKind::Directory
             } else {
-                FileType::RegularFile
+                FileKind::RegularFile
             };
-            entries.push((child_ino, kind, name));
+            entries.push((OsString::from(name), kind));
         }
 
-        for (i, (ino, kind, name)) in entries.into_iter().enumerate().skip(offset as usize) {
-            if reply.add(ino, (i + 1) as i64, kind, name) {
-                break;
-            }
-        }
-
-        reply.ok();
+        Ok(entries)
     }
 
     fn readdirplus(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        mut reply: ReplyDirectoryPlus,
-    ) {
-        let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
+        &self,
+        _req: &RequestInfo,
+        file_id: PathBuf,
+        _file_handle: BorrowedFileHandle<'_>,
+    ) -> FuseResult<Vec<(OsString, FileAttribute)>> {
+        let rel_path = Self::to_rel_string(&file_id);
+        let mut entries: Vec<(OsString, FileAttribute)> = Vec::new();
+
+        if let Some(backend_path) = self.resolve_backend(&file_id) {
+            if let Ok(attr) = unix_fs::lookup(&backend_path) {
+                entries.push((".".into(), self.with_ttl(attr)));
+            }
+        }
+
+        let parent = Self::parent_path(&file_id);
+        if let Some(backend_path) = self.resolve_backend(&parent) {
+            if let Ok(attr) = unix_fs::lookup(&backend_path) {
+                entries.push(("..".into(), self.with_ttl(attr)));
+            }
+        }
+
         let manifest = self.manifest.read();
-
-        let mut entries: Vec<(u64, FileAttr, String)> = Vec::new();
-
-        // Add . and ..
-        if let Some(dot_attr) = self.get_attr(ino, &self.real_root) {
-            entries.push((ino, dot_attr, ".".to_string()));
-        }
-        let parent_ino = if path.is_empty() { 1 } else { ino };
-        if let Some(dotdot_attr) = self.get_attr(parent_ino, &self.real_root) {
-            entries.push((parent_ino, dotdot_attr, "..".to_string()));
-        }
-
-        for (name, _is_dir) in manifest.readdir(&path) {
-            let child_path = join_child(&path, &name);
-            if let Some(backend_path) = manifest.resolve(&child_path) {
-                let child_ino = self.get_or_create_ino(&child_path);
-                if let Some(attr) = self.get_attr(child_ino, &backend_path) {
-                    entries.push((child_ino, attr, name));
+        for (name, _is_dir) in manifest.readdir(&rel_path) {
+            let child_path = Self::join_child(&file_id, OsStr::new(&name));
+            if let Some(backend_path) = manifest.resolve(&Self::to_rel_string(&child_path)) {
+                if let Ok(attr) = unix_fs::lookup(&backend_path) {
+                    entries.push((OsString::from(name), self.with_ttl(attr)));
                 }
             }
         }
 
-        drop(manifest);
-
-        for (i, (child_ino, attr, name)) in entries.into_iter().enumerate().skip(offset as usize) {
-            if reply.add(child_ino, (i + 1) as i64, &name, &TTL, &attr, 0) {
-                break;
-            }
-        }
-
-        reply.ok();
+        Ok(entries)
     }
 
-    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
-        let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
-        trace!(ino, path = %path, flags, "FUSE open");
-        let backend_path =
-            option_or_reply!(self.manifest.read().resolve(&path), reply, libc::ENOENT);
-        let file = io_or_reply!(
-            OpenOptions::new()
-                .read(true)
-                .write((flags & libc::O_WRONLY != 0) || (flags & libc::O_RDWR != 0))
-                .open(&backend_path),
-            reply
-        );
-
-        let fh = self.alloc_fh(file);
-        reply.opened(fh, 0);
-    }
-
-    fn read(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        reply: ReplyData,
-    ) {
-        trace!(ino, fh, offset, size, "FUSE read");
-        let mut file = option_or_reply!(self.get_file(fh), reply, libc::EBADF);
-        io_or_reply!(file.seek(SeekFrom::Start(offset as u64)), reply);
-
-        let mut buf = vec![0u8; size as usize];
-        let n = io_or_reply!(file.read(&mut buf), reply);
-        reply.data(&buf[..n]);
-    }
-
-    fn write(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        data: &[u8],
-        _write_flags: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        reply: ReplyWrite,
-    ) {
-        trace!(ino, fh, offset, size = data.len(), "FUSE write");
-        let mut handles = self.handles.write();
-        let file = option_or_reply!(handles.get_mut(&fh), reply, libc::EBADF);
-        io_or_reply!(file.seek(SeekFrom::Start(offset as u64)), reply);
-        let n = io_or_reply!(file.write(data), reply);
-        reply.written(n as u32);
-    }
-
-    fn release(
-        &mut self,
-        _req: &Request,
-        _ino: u64,
-        fh: u64,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        _flush: bool,
-        reply: ReplyEmpty,
-    ) {
-        self.release_fh(fh);
-        reply.ok();
+    fn open(
+        &self,
+        _req: &RequestInfo,
+        file_id: PathBuf,
+        flags: OpenFlags,
+    ) -> FuseResult<(OwnedFileHandle, FUSEOpenResponseFlags)> {
+        trace!(path = %Self::display_path(&file_id), ?flags, "FUSE open");
+        let backend_path = self
+            .manifest
+            .read()
+            .resolve(&Self::to_rel_string(&file_id))
+            .ok_or_else(|| Self::file_not_found(&file_id))?;
+        let fd = unix_fs::open(&backend_path, flags)?;
+        let handle = OwnedFileHandle::from_owned_fd(fd).ok_or_else(Self::bad_file_handle)?;
+        Ok((handle, FUSEOpenResponseFlags::empty()))
     }
 
     fn create(
-        &mut self,
-        _req: &Request,
-        parent: u64,
+        &self,
+        _req: &RequestInfo,
+        parent_id: PathBuf,
         name: &OsStr,
         mode: u32,
-        _umask: u32,
-        flags: i32,
-        reply: ReplyCreate,
-    ) {
-        let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
-        let name = name.to_string_lossy();
-        let child_path = join_child(&parent_path, name.as_ref());
-        trace!(parent, name = %name, path = %child_path, mode, "FUSE create");
-        let target_dir = self.manifest.read().create_target(&parent_path);
-        let backend_path = target_dir.join(&*name);
-
-        if let Some(parent) = backend_path.parent() {
-            io_or_reply!(fs::create_dir_all(parent), reply);
-        }
-
-        let file = io_or_reply!(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(flags & libc::O_TRUNC != 0)
-                .mode(mode)
-                .open(&backend_path),
-            reply
+        umask: u32,
+        flags: OpenFlags,
+    ) -> FuseResult<(OwnedFileHandle, FileAttribute, FUSEOpenResponseFlags)> {
+        let rel_parent = Self::to_rel_string(&parent_id);
+        let child_path = Self::join_child(&parent_id, name);
+        trace!(
+            parent = %Self::display_path(&parent_id),
+            name = %name.to_string_lossy(),
+            mode,
+            "FUSE create"
         );
 
-        let ino = self.get_or_create_ino(&child_path);
-        let fh = self.alloc_fh(file);
-        self.manifest.write().add_entry(&child_path, false);
-        self.notify_inval_entry(parent, &name);
+        let target_dir = self.manifest.read().create_target(&rel_parent);
+        let backend_path = target_dir.join(name);
 
-        let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::EIO);
-        reply.created(&TTL, &attr, 0, fh, 0);
-    }
+        let (fd, attr) = unix_fs::create(&backend_path, mode, umask, flags)?;
+        let handle = OwnedFileHandle::from_owned_fd(fd).ok_or_else(Self::bad_file_handle)?;
 
-    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
-        let name = name.to_string_lossy();
-        let child_path = join_child(&parent_path, name.as_ref());
-        trace!(parent, name = %name, path = %child_path, "FUSE unlink");
-        let backend_path = option_or_reply!(
-            self.manifest.read().resolve(&child_path),
-            reply,
-            libc::ENOENT
-        );
-        io_or_reply!(fs::remove_file(&backend_path), reply);
-        self.manifest.write().remove_entry(&child_path);
-        self.notify_inval_entry(parent, &name);
-        reply.ok();
+        self.manifest
+            .write()
+            .add_entry_with_backend(&Self::to_rel_string(&child_path), backend_path, false);
+
+        Ok((handle, self.with_ttl(attr), FUSEOpenResponseFlags::empty()))
     }
 
     fn mkdir(
-        &mut self,
-        _req: &Request,
-        parent: u64,
+        &self,
+        _req: &RequestInfo,
+        parent_id: PathBuf,
         name: &OsStr,
         mode: u32,
-        _umask: u32,
-        reply: ReplyEntry,
-    ) {
-        let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
-        let name = name.to_string_lossy();
-        let child_path = join_child(&parent_path, name.as_ref());
-        trace!(parent, name = %name, path = %child_path, mode, "FUSE mkdir");
-        let target_dir = self.manifest.read().create_target(&parent_path);
-        let backend_path = target_dir.join(&*name);
+        umask: u32,
+    ) -> FuseResult<FileAttribute> {
+        let rel_parent = Self::to_rel_string(&parent_id);
+        let child_path = Self::join_child(&parent_id, name);
+        trace!(
+            parent = %Self::display_path(&parent_id),
+            name = %name.to_string_lossy(),
+            mode,
+            "FUSE mkdir"
+        );
 
-        io_or_reply!(fs::create_dir(&backend_path), reply);
-        if let Err(e) = fs::set_permissions(&backend_path, fs::Permissions::from_mode(mode)) {
-            eprintln!("Warning: failed to set permissions: {e}");
-        }
+        let target_dir = self.manifest.read().create_target(&rel_parent);
+        let backend_path = target_dir.join(name);
+        let attr = unix_fs::mkdir(&backend_path, mode, umask)?;
 
-        let ino = self.get_or_create_ino(&child_path);
-        self.manifest.write().add_entry(&child_path, true);
-        self.notify_inval_entry(parent, &name);
+        self.manifest
+            .write()
+            .add_entry_with_backend(&Self::to_rel_string(&child_path), backend_path, true);
 
-        let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::EIO);
-        reply.entry(&TTL, &attr, 0);
+        Ok(self.with_ttl(attr))
     }
 
-    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
-        let name = name.to_string_lossy();
-        let child_path = join_child(&parent_path, name.as_ref());
-        trace!(parent, name = %name, path = %child_path, "FUSE rmdir");
-        let backend_path = option_or_reply!(
-            self.manifest.read().resolve(&child_path),
-            reply,
-            libc::ENOENT
+    fn unlink(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<()> {
+        let child_path = Self::join_child(&parent_id, name);
+        trace!(
+            parent = %Self::display_path(&parent_id),
+            name = %name.to_string_lossy(),
+            "FUSE unlink"
         );
-        io_or_reply!(fs::remove_dir(&backend_path), reply);
-        self.manifest.write().remove_entry(&child_path);
-        self.notify_inval_entry(parent, &name);
-        reply.ok();
+        let backend_path = self
+            .manifest
+            .read()
+            .resolve(&Self::to_rel_string(&child_path))
+            .ok_or_else(|| Self::file_not_found(&child_path))?;
+        unix_fs::unlink(&backend_path)?;
+        self.manifest
+            .write()
+            .remove_entry(&Self::to_rel_string(&child_path));
+        Ok(())
+    }
+
+    fn rmdir(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<()> {
+        let child_path = Self::join_child(&parent_id, name);
+        trace!(
+            parent = %Self::display_path(&parent_id),
+            name = %name.to_string_lossy(),
+            "FUSE rmdir"
+        );
+        let backend_path = self
+            .manifest
+            .read()
+            .resolve(&Self::to_rel_string(&child_path))
+            .ok_or_else(|| Self::file_not_found(&child_path))?;
+        unix_fs::rmdir(&backend_path)?;
+        self.manifest
+            .write()
+            .remove_entry(&Self::to_rel_string(&child_path));
+        Ok(())
     }
 
     fn rename(
-        &mut self,
-        _req: &Request,
-        parent: u64,
+        &self,
+        _req: &RequestInfo,
+        parent_id: PathBuf,
         name: &OsStr,
-        newparent: u64,
+        newparent: PathBuf,
         newname: &OsStr,
-        _flags: u32,
-        reply: ReplyEmpty,
-    ) {
-        let parent_path = option_or_reply!(self.get_path(parent), reply, libc::ENOENT);
-        let newparent_path = option_or_reply!(self.get_path(newparent), reply, libc::ENOENT);
-
-        let name = name.to_string_lossy();
-        let newname = newname.to_string_lossy();
-
-        let old_path = join_child(&parent_path, name.as_ref());
-        let new_path = join_child(&newparent_path, newname.as_ref());
-        trace!(old = %old_path, new = %new_path, "FUSE rename");
+        flags: RenameFlags,
+    ) -> FuseResult<()> {
+        let old_path = Self::join_child(&parent_id, name);
+        let new_path = Self::join_child(&newparent, newname);
+        let old_rel = Self::to_rel_string(&old_path);
+        let new_rel = Self::to_rel_string(&new_path);
+        let newparent_rel = Self::to_rel_string(&newparent);
+        trace!(
+            old = %Self::display_path(&old_path),
+            new = %Self::display_path(&new_path),
+            ?flags,
+            "FUSE rename"
+        );
 
         let (old_backend, new_backend) = {
             let manifest = self.manifest.read();
-            let old_backend = option_or_reply!(manifest.resolve(&old_path), reply, libc::ENOENT);
-            let new_backend = match manifest.resolve(&new_path) {
-                Some(p) => p,
+            let old_backend = manifest
+                .resolve(&old_rel)
+                .ok_or_else(|| Self::file_not_found(&old_path))?;
+            let new_backend = match manifest.resolve(&new_rel) {
+                Some(path) => path,
                 None => {
-                    let target_dir = manifest.create_target(&newparent_path);
-                    target_dir.join(newname.as_ref())
+                    let target_dir = manifest.create_target(&newparent_rel);
+                    target_dir.join(newname)
                 }
             };
             (old_backend, new_backend)
         };
 
-        io_or_reply!(fs::rename(&old_backend, &new_backend), reply);
-        self.manifest.write().rename_entry(&old_path, &new_path);
-
-        // Refresh both the old and new parent directory entries.
-        self.notify_inval_entry(parent, name.as_ref());
-        self.notify_inval_entry(newparent, newname.as_ref());
-        reply.ok();
+        unix_fs::rename(&old_backend, &new_backend, flags)?;
+        self.manifest.write().rename_entry_with_backend(
+            &old_rel,
+            &new_rel,
+            &old_backend,
+            &new_backend,
+        );
+        Ok(())
     }
 
     fn setattr(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        mode: Option<u32>,
-        uid: Option<u32>,
-        gid: Option<u32>,
-        size: Option<u64>,
-        _atime: Option<TimeOrNow>,
-        _mtime: Option<TimeOrNow>,
-        _ctime: Option<SystemTime>,
-        fh: Option<u64>,
-        _crtime: Option<SystemTime>,
-        _chgtime: Option<SystemTime>,
-        _bkuptime: Option<SystemTime>,
-        _flags: Option<u32>,
-        reply: ReplyAttr,
-    ) {
-        let path = option_or_reply!(self.get_path(ino), reply, libc::ENOENT);
-        trace!(ino, path = %path, ?mode, ?size, "FUSE setattr");
-
-        let backend_path = if path.is_empty() {
-            self.real_root.clone()
-        } else {
-            option_or_reply!(self.manifest.read().resolve(&path), reply, libc::ENOENT)
-        };
-
-        if let Some(size) = size {
-            if let Some(fh) = fh {
-                if let Some(file) = self.get_file(fh) {
-                    io_or_reply!(file.set_len(size), reply);
-                }
-            } else {
-                io_or_reply!(
-                    fs::File::open(&backend_path).and_then(|f| f.set_len(size)),
-                    reply
-                );
-            }
-        }
-
-        if let Some(mode) = mode {
-            io_or_reply!(
-                fs::set_permissions(&backend_path, fs::Permissions::from_mode(mode)),
-                reply
-            );
-        }
-
-        if uid.is_some() || gid.is_some() {
-            // Skip chown for now - requires unsafe and root.
-        }
-
-        let attr = option_or_reply!(self.get_attr(ino, &backend_path), reply, libc::EIO);
-        reply.attr(&TTL, &attr);
+        &self,
+        _req: &RequestInfo,
+        file_id: PathBuf,
+        request: &SetAttrRequest,
+        _file_handle: Option<BorrowedFileHandle<'_>>,
+    ) -> FuseResult<FileAttribute> {
+        trace!(path = %Self::display_path(&file_id), "FUSE setattr");
+        let backend_path = self
+            .resolve_backend(&file_id)
+            .ok_or_else(|| Self::file_not_found(&file_id))?;
+        let attr = unix_fs::setattr(&backend_path, request)?;
+        Ok(self.with_ttl(attr))
     }
 }
