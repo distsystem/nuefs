@@ -5,6 +5,7 @@ The lockfile is the single source of truth for what gets sent to the daemon.
 """
 
 import hashlib
+import os
 import pathlib
 import time
 import typing
@@ -13,6 +14,9 @@ import pydantic
 from sheaves.sheaf import Sheaf
 
 import nuefs._nuefs as _ext
+
+# Directories to skip during scan (caches, build artifacts)
+SKIP_DIRS = {".git", ".pixi", "node_modules", "__pycache__", ".venv", "target"}
 
 
 class LockMeta(pydantic.BaseModel):
@@ -49,15 +53,31 @@ class Lock(Sheaf):
         entries: dict[str, _ext.ManifestEntry] = {}
 
         if include_real and root.exists():
-            for path in root.rglob("*"):
-                if ".git" in path.parts:
-                    continue
-                rel = str(path.relative_to(root))
-                entries[rel] = _ext.ManifestEntry(
-                    virtual_path=rel,
-                    backend_path=path,
-                    is_dir=path.is_dir(),
-                )
+            for dirpath, dirnames, filenames in os.walk(root):
+                # Prune skip dirs in-place to avoid descending
+                dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+
+                dp = pathlib.Path(dirpath)
+                for name in dirnames:
+                    path = dp / name
+                    rel = str(path.relative_to(root))
+                    entries[rel] = _ext.ManifestEntry(
+                        virtual_path=rel,
+                        backend_path=path,
+                        is_dir=True,
+                    )
+                for name in filenames:
+                    path = dp / name
+                    try:
+                        is_dir = path.is_dir()
+                    except (PermissionError, OSError):
+                        continue
+                    rel = str(path.relative_to(root))
+                    entries[rel] = _ext.ManifestEntry(
+                        virtual_path=rel,
+                        backend_path=path,
+                        is_dir=is_dir,
+                    )
 
         for source, target in mounts:
             cls._apply_layer(entries, source, target)
@@ -111,24 +131,42 @@ class Lock(Sheaf):
                     is_dir=True,
                 )
 
-        for path in source.rglob("*"):
-            if not include_git and ".git" in path.parts:
-                continue
+        skip_dirs = SKIP_DIRS if not include_git else SKIP_DIRS - {".git"}
 
-            rel = path.relative_to(source)
-            virtual = (
-                str(rel) if target == "." else str(pathlib.PurePosixPath(target) / rel)
-            )
+        for dirpath, dirnames, filenames in os.walk(source):
+            # Prune skip dirs in-place
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
 
-            if not include_git and (virtual == ".git" or virtual.startswith(".git/")):
-                continue
+            dp = pathlib.Path(dirpath)
+            rel_base = dp.relative_to(source)
 
-            if virtual in entries:
-                if entries[virtual].is_dir and path.is_dir():
+            for name in dirnames:
+                path = dp / name
+                rel = rel_base / name
+                virtual = (
+                    str(rel) if target == "." else str(pathlib.PurePosixPath(target) / rel)
+                )
+                if virtual not in entries or not entries[virtual].is_dir:
+                    entries[virtual] = _ext.ManifestEntry(
+                        virtual_path=virtual,
+                        backend_path=path,
+                        is_dir=True,
+                    )
+
+            for name in filenames:
+                path = dp / name
+                try:
+                    is_dir = path.is_dir()
+                except (PermissionError, OSError):
                     continue
-
-            entries[virtual] = _ext.ManifestEntry(
-                virtual_path=virtual,
-                backend_path=path,
-                is_dir=path.is_dir(),
-            )
+                rel = rel_base / name
+                virtual = (
+                    str(rel) if target == "." else str(pathlib.PurePosixPath(target) / rel)
+                )
+                if virtual in entries and entries[virtual].is_dir and is_dir:
+                    continue
+                entries[virtual] = _ext.ManifestEntry(
+                    virtual_path=virtual,
+                    backend_path=path,
+                    is_dir=is_dir,
+                )

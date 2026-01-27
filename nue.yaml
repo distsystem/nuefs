@@ -1,15 +1,4 @@
 apiVersion: nue/v1
 mounts:
-- source: ~/repos/example
-  target: .
-  exclude:
-  - '*.pyc'
-  - __pycache__/
-  - .git/
-  include:
-  - src/
-  - tests/
-- source: ~/local/lib
-  target: vendor/lib
-  config:
-    create_policy: first
+- source: ../sheaves
+  target: sheaves

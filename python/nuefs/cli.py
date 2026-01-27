@@ -6,6 +6,7 @@ import sys
 import time
 
 from rich.panel import Panel
+from rich.tree import Tree
 from sheaves.cli import Command, cli
 from sheaves.console import console
 
@@ -42,12 +43,14 @@ class NueBaseCommand(Manifest, Command, app_name="nue"):
 
 
 class Mount(NueBaseCommand):
+    dry_run: bool = False
+
     def run(self) -> None:
         cwd = os.getcwd()
         root = os.fspath(self.root)
 
         git_path = self.root / ".git"
-        if git_path.exists():
+        if git_path.exists() and not self.dry_run:
             gitdir_mod.ensure_external_gitdir(
                 self.root, gitdir_mod.default_gitdir_root()
             )
@@ -59,6 +62,11 @@ class Mount(NueBaseCommand):
                 source = (self.root / source).resolve()
             mounts.append((source, str(entry.target)))
         lock = Lock.compile(self.root, mounts)
+
+        if self.dry_run:
+            self._print_tree(lock)
+            return
+
         lock.save(self.root / "nue.lock")
 
         os.chdir("/")
@@ -75,6 +83,39 @@ class Mount(NueBaseCommand):
                     border_style="yellow",
                 )
             )
+
+    def _print_tree(self, lock: Lock) -> None:
+        """Print the virtual file tree without actually mounting."""
+        tree = Tree(f"[bold blue]{self.root}[/]")
+        nodes: dict[str, Tree] = {"": tree}
+
+        entries = sorted(lock.entries, key=lambda e: e.virtual_path)
+
+        for entry in entries:
+            parts = pathlib.PurePosixPath(entry.virtual_path).parts
+            parent_path = ""
+
+            for i, part in enumerate(parts):
+                current_path = "/".join(parts[: i + 1])
+                if current_path in nodes:
+                    parent_path = current_path
+                    continue
+
+                parent_node = nodes[parent_path]
+                is_last = i == len(parts) - 1
+
+                if is_last:
+                    if entry.is_dir:
+                        label = f"[bold cyan]{part}/[/] [dim]→ {entry.backend_path}[/]"
+                    else:
+                        label = f"{part} [dim]→ {entry.backend_path}[/]"
+                else:
+                    label = f"[bold cyan]{part}/[/]"
+
+                nodes[current_path] = parent_node.add(label)
+                parent_path = current_path
+
+        console.print(tree)
 
 
 class Unmount(NueBaseCommand):
