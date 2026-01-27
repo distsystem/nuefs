@@ -44,7 +44,7 @@ impl ManifestEntry {
     }
 
     #[staticmethod]
-    fn _pydantic_validate(py: Python<'_>, v: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+    fn _pydantic_validate(py: Python<'_>, v: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if v.extract::<PyRef<'_, Self>>().is_ok() {
             return Ok(v.clone().unbind());
         }
@@ -87,7 +87,7 @@ impl ManifestEntry {
     }
 
     #[staticmethod]
-    fn _pydantic_serialize(py: Python<'_>, v: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+    fn _pydantic_serialize(py: Python<'_>, v: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let entry = v.extract::<PyRef<'_, Self>>()?;
         let dict = PyDict::new(py);
         dict.set_item("virtual_path", &entry.virtual_path)?;
@@ -104,7 +104,7 @@ impl ManifestEntry {
         cls: &Bound<'_, PyType>,
         _source: &Bound<'_, PyAny>,
         _handler: &Bound<'_, PyAny>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let py = cls.py();
 
         let core_schema = py.import("pydantic_core.core_schema")?;

@@ -8,14 +8,14 @@ use easy_fuser::templates::DefaultFuseHandler;
 use easy_fuser::types::errors::{ErrorKind, PosixError};
 use easy_fuser::unix_fs;
 use parking_lot::RwLock;
-use tracing::{debug, trace};
+use tracing::trace;
 
 use super::manager::Manifest;
 
 pub(crate) struct NueFs {
     real_root: PathBuf,
     manifest: Arc<RwLock<Manifest>>,
-    inner: FdHandlerHelper<DefaultFuseHandler>,
+    inner: FdHandlerHelper<PathBuf>,
 }
 
 impl NueFs {
@@ -334,8 +334,7 @@ impl FuseHandler<PathBuf> for NueFs {
         &self,
         _req: &RequestInfo,
         file_id: PathBuf,
-        request: &SetAttrRequest,
-        _file_handle: Option<BorrowedFileHandle<'_>>,
+        request: SetAttrRequest,
     ) -> FuseResult<FileAttribute> {
         trace!(path = %Self::display_path(&file_id), "FUSE setattr");
         let backend_path = self

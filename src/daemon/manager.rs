@@ -329,12 +329,6 @@ impl Manifest {
         children.into_iter().collect()
     }
 
-    pub(crate) fn add_entry(&mut self, path: &str, is_dir: bool) {
-        let path = path.trim_start_matches('/');
-        let backend_path = self.access_root.join(path);
-        self.add_entry_with_backend(path, backend_path, is_dir);
-    }
-
     pub(crate) fn add_entry_with_backend(
         &mut self,
         path: &str,
