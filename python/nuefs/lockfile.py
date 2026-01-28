@@ -162,6 +162,14 @@ class Lock(Sheaf):
         if not source.exists():
             return
 
+        # Add the target directory itself (e.g., "sheaves" -> /path/to/sheaves)
+        if target != ".":
+            entries[target] = _ext.ManifestEntry(
+                virtual_path=target,
+                backend_path=source,
+                is_dir=True,
+            )
+
         # Walk the source directory and apply exclude/include filtering
         for dirpath, dirnames, filenames in os.walk(source):
             dp = pathlib.Path(dirpath)

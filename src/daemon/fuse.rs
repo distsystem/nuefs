@@ -34,6 +34,11 @@ impl NueFs {
     /// Open a file relative to the real root fd using openat.
     /// This avoids path resolution through the FUSE mount.
     fn open_relative(&self, rel_path: &str) -> std::io::Result<File> {
+        self.open_relative_with_flags(rel_path, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+    }
+
+    /// Open a file relative to the real root fd using openat with custom flags.
+    fn open_relative_with_flags(&self, rel_path: &str, flags: i32) -> std::io::Result<File> {
         use std::ffi::CString;
         use std::os::unix::io::FromRawFd;
 
@@ -54,7 +59,7 @@ impl NueFs {
             libc::openat(
                 self.real_root_fd.as_raw_fd(),
                 c_path.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                flags | libc::O_CLOEXEC,
             )
         };
 
@@ -108,24 +113,6 @@ impl NueFs {
         let backend_path = self.real_root.join(rel_path);
         debug!(backend_path = %backend_path.display(), "create_relative success");
         Ok((unsafe { File::from_raw_fd(fd) }, backend_path))
-    }
-
-    /// Resolve a path to a safe PathBuf that bypasses FUSE.
-    /// For Real paths, returns /proc/self/fd/{fd} with a guard File.
-    /// For Layer paths, returns the backend path directly.
-    /// The returned File (if Some) must be kept alive while using the path.
-    fn safe_path(&self, rel_path: &str) -> FuseResult<(PathBuf, Option<File>)> {
-        match self.manifest.read().resolve(rel_path) {
-            Some(ResolvedPath::Real(rel)) => {
-                let file = self.open_relative(&rel).map_err(|e| {
-                    PosixError::new(ErrorKind::InputOutputError, e.to_string())
-                })?;
-                let proc_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
-                Ok((proc_path, Some(file)))
-            }
-            Some(ResolvedPath::Layer(p)) => Ok((p, None)),
-            None => Err(ErrorKind::FileNotFound.to_error("not found")),
-        }
     }
 
     /// Remove a file or directory, using *at syscalls for Real paths.
@@ -516,10 +503,32 @@ impl FuseHandler<PathBuf> for NueFs {
         flags: OpenFlags,
     ) -> FuseResult<(OwnedFileHandle, FUSEOpenResponseFlags)> {
         debug!(path = %Self::display_path(&file_id), ?flags, "FUSE open");
-        let (path, _guard) = self.safe_path(&Self::to_rel_string(&file_id))?;
-        let fd = unix_fs::open(&path, flags)?;
-        let handle = OwnedFileHandle::from_owned_fd(fd).ok_or_else(Self::bad_file_handle)?;
-        Ok((handle, FUSEOpenResponseFlags::empty()))
+        let rel_path = Self::to_rel_string(&file_id);
+        let resolved = self.manifest.read().resolve(&rel_path);
+
+        match resolved {
+            Some(ResolvedPath::Real(rel)) => {
+                // Use openat directly to avoid /proc/self/fd symlink issues with O_NOFOLLOW
+                let libc_flags = flags.bits() as i32;
+                let file = self.open_relative_with_flags(&rel, libc_flags).map_err(|e| {
+                    let kind = match e.kind() {
+                        std::io::ErrorKind::NotFound => ErrorKind::FileNotFound,
+                        std::io::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
+                        _ => ErrorKind::InputOutputError,
+                    };
+                    PosixError::new(kind, e.to_string())
+                })?;
+                let handle = OwnedFileHandle::from_owned_fd(file.into())
+                    .ok_or_else(Self::bad_file_handle)?;
+                Ok((handle, FUSEOpenResponseFlags::empty()))
+            }
+            Some(ResolvedPath::Layer(path)) => {
+                let fd = unix_fs::open(&path, flags)?;
+                let handle = OwnedFileHandle::from_owned_fd(fd).ok_or_else(Self::bad_file_handle)?;
+                Ok((handle, FUSEOpenResponseFlags::empty()))
+            }
+            None => Err(Self::file_not_found(&file_id)),
+        }
     }
 
     fn create(
@@ -713,17 +722,8 @@ impl FuseHandler<PathBuf> for NueFs {
             self.rename_at(&old_rel, &new_rel, flags.bits())
                 .map_err(|e| PosixError::new(ErrorKind::InputOutputError, e.to_string()))?;
         } else {
-            // Use safe_path for mixed Real/Layer renames
-            let (old_safe, _g1) = self.safe_path(&old_rel)?;
-            let (new_safe, _g2) = match self.safe_path(&new_rel) {
-                Ok(p) => p,
-                Err(_) => {
-                    // New doesn't exist, get parent's safe path
-                    let (parent_safe, g) = self.safe_path(&newparent_rel)?;
-                    (parent_safe.join(newname), g)
-                }
-            };
-            unix_fs::rename(&old_safe, &new_safe, flags)?;
+            // For mixed Real/Layer renames, use full paths bypassing FUSE
+            unix_fs::rename(&old_backend, &new_backend, flags)?;
         }
 
         self.manifest.write().rename_entry_with_backend(
@@ -742,8 +742,21 @@ impl FuseHandler<PathBuf> for NueFs {
         request: SetAttrRequest,
     ) -> FuseResult<FileAttribute> {
         debug!(path = %Self::display_path(&file_id), "FUSE setattr");
-        let (path, _guard) = self.safe_path(&Self::to_rel_string(&file_id))?;
-        let attr = unix_fs::setattr(&path, request)?;
-        Ok(self.with_ttl(attr))
+        let rel_path = Self::to_rel_string(&file_id);
+        let resolved = self.manifest.read().resolve(&rel_path);
+
+        match resolved {
+            Some(ResolvedPath::Real(rel)) => {
+                // Build full path bypassing FUSE
+                let full_path = self.real_root.join(&rel);
+                let attr = unix_fs::setattr(&full_path, request)?;
+                Ok(self.with_ttl(attr))
+            }
+            Some(ResolvedPath::Layer(path)) => {
+                let attr = unix_fs::setattr(&path, request)?;
+                Ok(self.with_ttl(attr))
+            }
+            None => Err(Self::file_not_found(&file_id)),
+        }
     }
 }

@@ -28,7 +28,7 @@ maturin = "*"
 uv = "*"
 
 [pypi-dependencies]
-sheaves = { path = "../sheaves", editable = true }
+sheaves = { path = "../sheaves", editable = false }
 nuefs = { path = ".", editable = true }
 
 [feature.build.activation.env]

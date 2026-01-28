@@ -4,9 +4,12 @@ import signal
 import subprocess
 import sys
 import time
+from typing import Annotated
 
+import pydantic
 from rich.panel import Panel
 from rich.tree import Tree
+from sheaves.annotations import Commands, Flag, Readonly
 from sheaves.cli import Command, cli
 from sheaves.console import console
 
@@ -37,13 +40,14 @@ def _lazy_unmount(root: pathlib.Path) -> None:
 
 
 class NueBaseCommand(Manifest, Command, app_name="nue"):
+    @pydantic.computed_field
     @property
-    def root(self) -> pathlib.Path:
+    def root(self) -> Annotated[pathlib.Path, Readonly]:
         return self.sheaf_source.parent
 
 
 class Mount(NueBaseCommand):
-    dry_run: bool = False
+    dry_run: Annotated[bool, Flag(help="Show virtual tree without mounting", short="-n")] = False
 
     def run(self) -> None:
         cwd = os.getcwd()
@@ -78,7 +82,8 @@ class Mount(NueBaseCommand):
 
         os.chdir("/")
 
-        nuefs.mount(self.root, lock.entries)
+        handle = nuefs.open(self.root)
+        handle.update(lock.entries)
 
         if cwd == root or cwd.startswith(f"{root}{os.sep}"):
             console.print(
@@ -217,7 +222,7 @@ class Stop(NueBaseCommand):
 
 
 def main() -> int:
-    cli(Mount | Unmount | Status | Stop).run()
+    cli(Annotated[Mount | Unmount | Status | Stop, Commands()]).run()
     return 0
 
 
