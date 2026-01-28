@@ -72,12 +72,15 @@ impl Manager {
         let real_root_fd = File::open(&root)?;
         let access_root = PathBuf::from(format!("/proc/self/fd/{}", real_root_fd.as_raw_fd()));
 
+        // Clone fd for NueFs (it needs its own fd for openat operations)
+        let fuse_root_fd = real_root_fd.try_clone()?;
+
         let manifest = Arc::new(RwLock::new(Manifest::from_entries(
             root.clone(),
             access_root.clone(),
             entries,
         )));
-        let fs = NueFs::new(access_root, manifest.clone());
+        let fs = NueFs::new(access_root, fuse_root_fd, manifest.clone());
 
         let options = vec![MountOption::FSName("nuefs".to_string())];
         let threads = std::thread::available_parallelism()
@@ -282,30 +285,156 @@ impl Manifest {
         }
     }
 
+    /// Check if a path is a Real source (under the mount root) or not in entries.
+    /// Returns true for root path or Real sources, false for Layer sources.
+    pub(crate) fn is_real_path(&self, path: &str) -> bool {
+        let path = path.trim_start_matches('/');
+        if path.is_empty() {
+            return true; // Root is always real
+        }
+
+        // Check exact match
+        if let Some(entry) = self.entries.get(path) {
+            return matches!(entry.source, Source::Real);
+        }
+
+        // Check prefix match - if parent is a Layer, this is not a real path
+        if self.find_prefix_match(path).is_some() {
+            return false;
+        }
+
+        // Not in entries and no prefix match - assume it's a real path
+        true
+    }
+
     pub(crate) fn which(&self, path: &str) -> Option<OwnerInfoWire> {
         let path = path.trim_start_matches('/');
-        self.entries.get(path).map(|entry| match &entry.source {
-            Source::Real => OwnerInfoWire {
+
+        // Try exact match first
+        if let Some(entry) = self.entries.get(path) {
+            return Some(match &entry.source {
+                Source::Real => OwnerInfoWire {
+                    owner: "real".to_string(),
+                    backend_path: self.display_root.join(path),
+                },
+                Source::Layer { backend_path } => OwnerInfoWire {
+                    owner: "layer".to_string(),
+                    backend_path: backend_path.clone(),
+                },
+            });
+        }
+
+        // Try prefix match for Layer directories
+        if let Some((backend_path, suffix)) = self.find_prefix_match(path) {
+            let full_path = if suffix.is_empty() {
+                backend_path.clone()
+            } else {
+                backend_path.join(&suffix)
+            };
+            return Some(OwnerInfoWire {
+                owner: "layer".to_string(),
+                backend_path: full_path,
+            });
+        }
+
+        // Fallback to real path
+        let real_path = self.access_root.join(path);
+        if real_path.exists() {
+            return Some(OwnerInfoWire {
                 owner: "real".to_string(),
                 backend_path: self.display_root.join(path),
-            },
-            Source::Layer { backend_path } => OwnerInfoWire {
-                owner: "layer".to_string(),
-                backend_path: backend_path.clone(),
-            },
-        })
+            });
+        }
+
+        None
     }
 
     pub(crate) fn resolve(&self, path: &str) -> Option<PathBuf> {
         let path = path.trim_start_matches('/');
-        self.entries.get(path).map(|e| match &e.source {
-            Source::Real => self.access_root.join(path),
-            Source::Layer { backend_path, .. } => backend_path.clone(),
-        })
+
+        // Try exact match first
+        if let Some(entry) = self.entries.get(path) {
+            return Some(match &entry.source {
+                Source::Real => self.access_root.join(path),
+                Source::Layer { backend_path, .. } => backend_path.clone(),
+            });
+        }
+
+        // Try prefix match for Layer directories
+        if let Some((backend_path, suffix)) = self.find_prefix_match(path) {
+            let resolved = if suffix.is_empty() {
+                backend_path
+            } else {
+                backend_path.join(&suffix)
+            };
+            if resolved.exists() {
+                return Some(resolved);
+            }
+        }
+
+        // Fallback to real path
+        let real_path = self.access_root.join(path);
+        if real_path.exists() {
+            return Some(real_path);
+        }
+
+        None
+    }
+
+    /// Find the longest matching prefix entry for a path.
+    /// Returns (backend_path, suffix) where the path maps to backend_path/suffix
+    fn find_prefix_match(&self, path: &str) -> Option<(PathBuf, String)> {
+        let mut best_match: Option<(PathBuf, String)> = None;
+        let mut best_len = 0;
+
+        for (entry_path, entry) in &self.entries {
+            if !entry.is_dir {
+                continue;
+            }
+
+            // Check if entry_path is a prefix of path
+            if path.starts_with(entry_path.as_str()) {
+                let rest = &path[entry_path.len()..];
+                // Must be followed by "/" or be exact match
+                if rest.is_empty() || rest.starts_with('/') {
+                    if entry_path.len() > best_len {
+                        if let Source::Layer { backend_path } = &entry.source {
+                            best_len = entry_path.len();
+                            let suffix = rest.trim_start_matches('/').to_string();
+                            best_match = Some((backend_path.clone(), suffix));
+                        }
+                    }
+                }
+            }
+        }
+
+        best_match
     }
 
     pub(crate) fn readdir(&self, path: &str) -> Vec<(String, bool)> {
         let prefix = path.trim_start_matches('/');
+
+        // First, try to find if this path maps to a Layer directory
+        if let Some(entry) = self.entries.get(prefix) {
+            if let Source::Layer { backend_path } = &entry.source {
+                if entry.is_dir {
+                    // Read directly from backend directory
+                    return self.readdir_from_backend(backend_path);
+                }
+            }
+        }
+
+        // Try prefix match
+        if let Some((backend_path, suffix)) = self.find_prefix_match(prefix) {
+            let target = if suffix.is_empty() {
+                backend_path
+            } else {
+                backend_path.join(&suffix)
+            };
+            return self.readdir_from_backend(&target);
+        }
+
+        // Fallback: collect from entries + real filesystem
         let prefix_with_slash = if prefix.is_empty() {
             String::new()
         } else {
@@ -314,6 +443,7 @@ impl Manifest {
 
         let mut children = HashMap::new();
 
+        // Collect from entries
         for (rel_path, entry) in &self.entries {
             if prefix.is_empty() {
                 if !rel_path.contains('/') {
@@ -326,7 +456,41 @@ impl Manifest {
             }
         }
 
+        // Also read from real filesystem
+        let real_path = if prefix.is_empty() {
+            self.access_root.clone()
+        } else {
+            self.access_root.join(prefix)
+        };
+
+        if real_path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&real_path) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if !children.contains_key(&name) {
+                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        children.insert(name, is_dir);
+                    }
+                }
+            }
+        }
+
         children.into_iter().collect()
+    }
+
+    /// Read directory contents directly from a backend path.
+    fn readdir_from_backend(&self, backend_path: &PathBuf) -> Vec<(String, bool)> {
+        let mut children = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(backend_path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                children.push((name, is_dir));
+            }
+        }
+
+        children
     }
 
     pub(crate) fn add_entry_with_backend(
@@ -427,12 +591,22 @@ impl Manifest {
     pub(crate) fn create_target(&self, parent_path: &str) -> PathBuf {
         let parent_path = parent_path.trim_start_matches('/');
 
+        // Try exact match first
         if let Some(entry) = self.entries.get(parent_path) {
             if let Source::Layer { backend_path, .. } = &entry.source {
                 if entry.is_dir {
                     return backend_path.clone();
                 }
             }
+        }
+
+        // Try prefix match
+        if let Some((backend_path, suffix)) = self.find_prefix_match(parent_path) {
+            return if suffix.is_empty() {
+                backend_path
+            } else {
+                backend_path.join(&suffix)
+            };
         }
 
         if parent_path.is_empty() {

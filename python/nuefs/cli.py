@@ -11,7 +11,7 @@ from sheaves.cli import Command, cli
 from sheaves.console import console
 
 import nuefs
-from nuefs.lockfile import Lock
+from nuefs.lockfile import Lock, MountLayer
 
 from . import gitdir as gitdir_mod
 from .manifest import Manifest
@@ -60,7 +60,14 @@ class Mount(NueBaseCommand):
             source = pathlib.Path(str(entry.source)).expanduser()
             if not source.is_absolute():
                 source = (self.root / source).resolve()
-            mounts.append((source, str(entry.target)))
+            mounts.append(
+                MountLayer(
+                    source=source,
+                    target=str(entry.target),
+                    exclude=entry.exclude,
+                    include=entry.include,
+                )
+            )
         lock = Lock.compile(self.root, mounts)
 
         if self.dry_run:

@@ -12,11 +12,21 @@ import typing
 
 import pydantic
 from sheaves.sheaf import Sheaf
+from sheaves.typing import Pathspec
 
 import nuefs._nuefs as _ext
 
 # Directories to skip during scan (caches, build artifacts)
 SKIP_DIRS = {".git", ".pixi", "node_modules", "__pycache__", ".venv", "target"}
+
+
+class MountLayer(typing.NamedTuple):
+    """A mount layer with source, target, and filtering rules."""
+
+    source: pathlib.Path
+    target: str
+    exclude: Pathspec
+    include: Pathspec
 
 
 class LockMeta(pydantic.BaseModel):
@@ -42,7 +52,7 @@ class Lock(Sheaf):
     def compile(
         cls,
         root: pathlib.Path,
-        mounts: typing.Iterable[tuple[pathlib.Path, str]] = (),
+        mounts: typing.Iterable[MountLayer | tuple[pathlib.Path, str]] = (),
         *,
         include_real: bool = True,
         nuefs_version: str | None = None,
@@ -79,8 +89,14 @@ class Lock(Sheaf):
                         is_dir=is_dir,
                     )
 
-        for source, target in mounts:
-            cls._apply_layer(entries, source, target)
+        for mount in mounts:
+            if isinstance(mount, MountLayer):
+                cls._apply_layer(
+                    entries, mount.source, mount.target, mount.exclude, mount.include
+                )
+            else:
+                source, target = mount
+                cls._apply_layer(entries, source, target, Pathspec(), Pathspec())
 
         manifest_sha256 = None
         manifest_file = root / manifest_path
@@ -102,14 +118,23 @@ class Lock(Sheaf):
         entries: dict[str, _ext.ManifestEntry],
         source: pathlib.Path,
         target: str,
+        exclude: Pathspec,
+        include: Pathspec,
     ) -> None:
+        """Apply a layer mount.
+
+        With prefix matching on the Rust side, we only need to pass the
+        top-level directory entry. Rust will handle subdirectory resolution.
+
+        TODO: Pass exclude/include patterns to Rust for filtering.
+        """
+        del exclude, include  # Currently unused, will be passed to Rust later
+
         source = source.expanduser().resolve()
 
         target = target.strip() if target else "."
         if target == "":
             target = "."
-
-        include_git = target == ".git" or target.startswith(".git/")
 
         if source.is_file():
             virtual = target if target != "." else source.name
@@ -123,50 +148,21 @@ class Lock(Sheaf):
         if not source.exists():
             return
 
+        # Only pass the top-level directory entry
+        # Rust will handle prefix matching for subdirectories
         if target != ".":
-            if target not in entries or not entries[target].is_dir:
-                entries[target] = _ext.ManifestEntry(
-                    virtual_path=target,
-                    backend_path=source,
-                    is_dir=True,
-                )
-
-        skip_dirs = SKIP_DIRS if not include_git else SKIP_DIRS - {".git"}
-
-        for dirpath, dirnames, filenames in os.walk(source):
-            # Prune skip dirs in-place
-            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
-
-            dp = pathlib.Path(dirpath)
-            rel_base = dp.relative_to(source)
-
-            for name in dirnames:
-                path = dp / name
-                rel = rel_base / name
-                virtual = (
-                    str(rel) if target == "." else str(pathlib.PurePosixPath(target) / rel)
-                )
-                if virtual not in entries or not entries[virtual].is_dir:
-                    entries[virtual] = _ext.ManifestEntry(
-                        virtual_path=virtual,
-                        backend_path=path,
-                        is_dir=True,
-                    )
-
-            for name in filenames:
-                path = dp / name
-                try:
-                    is_dir = path.is_dir()
-                except (PermissionError, OSError):
+            entries[target] = _ext.ManifestEntry(
+                virtual_path=target,
+                backend_path=source,
+                is_dir=True,
+            )
+        else:
+            # For target=".", we need to mount each top-level item
+            for item in source.iterdir():
+                if item.name in SKIP_DIRS:
                     continue
-                rel = rel_base / name
-                virtual = (
-                    str(rel) if target == "." else str(pathlib.PurePosixPath(target) / rel)
-                )
-                if virtual in entries and entries[virtual].is_dir and is_dir:
-                    continue
-                entries[virtual] = _ext.ManifestEntry(
-                    virtual_path=virtual,
-                    backend_path=path,
-                    is_dir=is_dir,
+                entries[item.name] = _ext.ManifestEntry(
+                    virtual_path=item.name,
+                    backend_path=item,
+                    is_dir=item.is_dir(),
                 )

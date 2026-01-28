@@ -1,5 +1,44 @@
 use python skill
 
+## FUSE Mount Safety
+
+Never `cd` into the mount directory when testing FUSE mounts. If the mount fails, all shell commands will hang with EIO errors.
+
+Always operate from outside:
+```bash
+# Good: run commands from outside
+(cd /tmp && ls /home/rok/distsystem/nuefs/sheaves/)
+
+# Bad: don't cd into mount directory
+cd /home/rok/distsystem/nuefs && ls sheaves/
+```
+
+Recovery when stuck:
+```bash
+fusermount3 -uz /home/rok/distsystem/nuefs
+pkill -9 nuefsd
+```
+
+## Debugging
+
+Daemon logs are written to `$XDG_RUNTIME_DIR/nuefsd.log` (typically `/run/user/1000/nuefsd.log`), NOT stdout.
+
+```bash
+# View daemon logs
+cat /run/user/1000/nuefsd.log
+
+# Tail logs in real-time (from another terminal)
+tail -f /run/user/1000/nuefsd.log
+
+# Start daemon with custom log path
+nuefsd --log /tmp/nuefsd-debug.log
+
+# Enable debug logging via RUST_LOG (set before daemon starts)
+RUST_LOG=debug pixi run nue mount
+```
+
+Log levels: `error`, `warn`, `info`, `debug`, `trace`
+
 ## Development
 
 ```bash

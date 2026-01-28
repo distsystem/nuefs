@@ -7,8 +7,10 @@ version = "0.1.0"
 [tasks]
 check = "cargo check"
 kill = "pkill -9 nuefsd || true"
+test = "pytest tests -v"
 
 [dependencies]
+pytest = "*"
 rust = "*"
 python = "=3.12"
 pygit2 = "*"

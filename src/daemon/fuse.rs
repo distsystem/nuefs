@@ -1,4 +1,6 @@
 use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::os::fd::{AsFd, AsRawFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -8,23 +10,59 @@ use easy_fuser::templates::DefaultFuseHandler;
 use easy_fuser::types::errors::{ErrorKind, PosixError};
 use easy_fuser::unix_fs;
 use parking_lot::RwLock;
-use tracing::trace;
+use tracing::{debug, warn};
 
 use super::manager::Manifest;
 
 pub(crate) struct NueFs {
     real_root: PathBuf,
+    real_root_fd: File,
     manifest: Arc<RwLock<Manifest>>,
     inner: FdHandlerHelper<PathBuf>,
 }
 
 impl NueFs {
-    pub(crate) fn new(real_root: PathBuf, manifest: Arc<RwLock<Manifest>>) -> Self {
+    pub(crate) fn new(real_root: PathBuf, real_root_fd: File, manifest: Arc<RwLock<Manifest>>) -> Self {
         Self {
             real_root,
+            real_root_fd,
             manifest,
             inner: FdHandlerHelper::new(DefaultFuseHandler::new()),
         }
+    }
+
+    /// Open a file relative to the real root fd using openat.
+    /// This avoids path resolution through the FUSE mount.
+    fn open_relative(&self, rel_path: &str) -> std::io::Result<File> {
+        use std::ffi::CString;
+        use std::os::unix::io::FromRawFd;
+
+        if rel_path.is_empty() || rel_path == "." {
+            // For root, duplicate the fd
+            let new_fd = unsafe { libc::dup(self.real_root_fd.as_raw_fd()) };
+            if new_fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            return Ok(unsafe { File::from_raw_fd(new_fd) });
+        }
+
+        let c_path = CString::new(rel_path).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path")
+        })?;
+
+        let fd = unsafe {
+            libc::openat(
+                self.real_root_fd.as_raw_fd(),
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Ok(unsafe { File::from_raw_fd(fd) })
     }
 
     fn display_path(path: &Path) -> String {
@@ -82,7 +120,7 @@ impl FuseHandler<PathBuf> for NueFs {
 
     fn lookup(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<FileAttribute> {
         let child_path = Self::join_child(&parent_id, name);
-        trace!(
+        debug!(
             parent = %Self::display_path(&parent_id),
             name = %name.to_string_lossy(),
             path = %Self::display_path(&child_path),
@@ -103,12 +141,45 @@ impl FuseHandler<PathBuf> for NueFs {
         file_id: PathBuf,
         _file_handle: Option<BorrowedFileHandle<'_>>,
     ) -> FuseResult<FileAttribute> {
-        trace!(path = %Self::display_path(&file_id), "FUSE getattr");
-        let backend_path = self
-            .resolve_backend(&file_id)
-            .ok_or_else(|| Self::file_not_found(&file_id))?;
-        let attr = unix_fs::lookup(&backend_path)?;
-        Ok(self.with_ttl(attr))
+        debug!(path = %Self::display_path(&file_id), "FUSE getattr");
+
+        // For root or paths under real_root, use openat to avoid FUSE deadlock
+        let rel_path = Self::to_rel_string(&file_id);
+        if file_id.as_os_str().is_empty() || self.manifest.read().is_real_path(&rel_path) {
+            debug!(path = %Self::display_path(&file_id), "getattr using openat for real path");
+            match self.open_relative(&rel_path) {
+                Ok(file) => {
+                    match unix_fs::getattr(file.as_fd()) {
+                        Ok(attr) => return Ok(self.with_ttl(attr)),
+                        Err(e) => {
+                            warn!(path = %Self::display_path(&file_id), error = %e, "getattr fstat failed");
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(path = %Self::display_path(&file_id), error = %e, "getattr openat failed");
+                    return Err(PosixError::new(ErrorKind::InputOutputError, e.to_string()));
+                }
+            }
+        }
+
+        // For Layer paths, use regular lookup (they're not under FUSE mount)
+        let backend_path = match self.resolve_backend(&file_id) {
+            Some(p) => p,
+            None => {
+                warn!(path = %Self::display_path(&file_id), "getattr: no backend path");
+                return Err(Self::file_not_found(&file_id));
+            }
+        };
+        debug!(path = %Self::display_path(&file_id), backend = %backend_path.display(), "getattr using lookup for layer path");
+        match unix_fs::lookup(&backend_path) {
+            Ok(attr) => Ok(self.with_ttl(attr)),
+            Err(e) => {
+                warn!(path = %Self::display_path(&file_id), backend = %backend_path.display(), error = %e, "getattr lookup failed");
+                Err(e)
+            }
+        }
     }
 
     fn readdir(
@@ -117,7 +188,7 @@ impl FuseHandler<PathBuf> for NueFs {
         file_id: PathBuf,
         _file_handle: BorrowedFileHandle<'_>,
     ) -> FuseResult<Vec<(OsString, FileKind)>> {
-        trace!(path = %Self::display_path(&file_id), "FUSE readdir");
+        debug!(path = %Self::display_path(&file_id), "FUSE readdir");
         let rel_path = Self::to_rel_string(&file_id);
         let mut entries: Vec<(OsString, FileKind)> = Vec::new();
         entries.push((".".into(), FileKind::Directory));
@@ -176,7 +247,7 @@ impl FuseHandler<PathBuf> for NueFs {
         file_id: PathBuf,
         flags: OpenFlags,
     ) -> FuseResult<(OwnedFileHandle, FUSEOpenResponseFlags)> {
-        trace!(path = %Self::display_path(&file_id), ?flags, "FUSE open");
+        debug!(path = %Self::display_path(&file_id), ?flags, "FUSE open");
         let backend_path = self
             .manifest
             .read()
@@ -198,7 +269,7 @@ impl FuseHandler<PathBuf> for NueFs {
     ) -> FuseResult<(OwnedFileHandle, FileAttribute, FUSEOpenResponseFlags)> {
         let rel_parent = Self::to_rel_string(&parent_id);
         let child_path = Self::join_child(&parent_id, name);
-        trace!(
+        debug!(
             parent = %Self::display_path(&parent_id),
             name = %name.to_string_lossy(),
             mode,
@@ -228,7 +299,7 @@ impl FuseHandler<PathBuf> for NueFs {
     ) -> FuseResult<FileAttribute> {
         let rel_parent = Self::to_rel_string(&parent_id);
         let child_path = Self::join_child(&parent_id, name);
-        trace!(
+        debug!(
             parent = %Self::display_path(&parent_id),
             name = %name.to_string_lossy(),
             mode,
@@ -248,7 +319,7 @@ impl FuseHandler<PathBuf> for NueFs {
 
     fn unlink(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<()> {
         let child_path = Self::join_child(&parent_id, name);
-        trace!(
+        debug!(
             parent = %Self::display_path(&parent_id),
             name = %name.to_string_lossy(),
             "FUSE unlink"
@@ -267,7 +338,7 @@ impl FuseHandler<PathBuf> for NueFs {
 
     fn rmdir(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<()> {
         let child_path = Self::join_child(&parent_id, name);
-        trace!(
+        debug!(
             parent = %Self::display_path(&parent_id),
             name = %name.to_string_lossy(),
             "FUSE rmdir"
@@ -298,7 +369,7 @@ impl FuseHandler<PathBuf> for NueFs {
         let old_rel = Self::to_rel_string(&old_path);
         let new_rel = Self::to_rel_string(&new_path);
         let newparent_rel = Self::to_rel_string(&newparent);
-        trace!(
+        debug!(
             old = %Self::display_path(&old_path),
             new = %Self::display_path(&new_path),
             ?flags,
@@ -336,7 +407,7 @@ impl FuseHandler<PathBuf> for NueFs {
         file_id: PathBuf,
         request: SetAttrRequest,
     ) -> FuseResult<FileAttribute> {
-        trace!(path = %Self::display_path(&file_id), "FUSE setattr");
+        debug!(path = %Self::display_path(&file_id), "FUSE setattr");
         let backend_path = self
             .resolve_backend(&file_id)
             .ok_or_else(|| Self::file_not_found(&file_id))?;
