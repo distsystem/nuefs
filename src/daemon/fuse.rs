@@ -646,6 +646,109 @@ impl FuseHandler<PathBuf> for NueFs {
         }
     }
 
+    fn readlink(&self, _req: &RequestInfo, file_id: PathBuf) -> FuseResult<Vec<u8>> {
+        let rel_path = Self::to_rel_string(&file_id);
+        debug!(path = %Self::display_path(&file_id), "FUSE readlink");
+
+        let resolved = self.manifest.read().resolve(&rel_path);
+        match resolved {
+            Some(ResolvedPath::Real(rel)) => {
+                let full_path = self.real_root.join(&rel);
+                unix_fs::readlink(&full_path)
+            }
+            Some(ResolvedPath::Layer(path)) => unix_fs::readlink(&path),
+            None => Err(Self::file_not_found(&file_id)),
+        }
+    }
+
+    fn symlink(
+        &self,
+        _req: &RequestInfo,
+        parent_id: PathBuf,
+        link_name: &OsStr,
+        target: &Path,
+    ) -> FuseResult<FileAttribute> {
+        let parent_rel = Self::to_rel_string(&parent_id);
+        let child_path = Self::join_child(&parent_id, link_name);
+        let child_rel = Self::to_rel_string(&child_path);
+        debug!(
+            parent = %Self::display_path(&parent_id),
+            link_name = %link_name.to_string_lossy(),
+            target = %target.display(),
+            "FUSE symlink"
+        );
+
+        let create_target = self.manifest.read().create_target(&parent_rel);
+        match create_target {
+            ResolvedPath::Real(_) => {
+                let full_path = self.real_root.join(&child_rel);
+                let attr = unix_fs::symlink(&full_path, target)?;
+                self.manifest
+                    .write()
+                    .add_entry_with_backend(&child_rel, full_path, false);
+                Ok(self.with_ttl(attr))
+            }
+            ResolvedPath::Layer(dir) => {
+                let backend_path = dir.join(link_name);
+                let attr = unix_fs::symlink(&backend_path, target)?;
+                self.manifest
+                    .write()
+                    .add_entry_with_backend(&child_rel, backend_path, false);
+                Ok(self.with_ttl(attr))
+            }
+        }
+    }
+
+    fn link(
+        &self,
+        _req: &RequestInfo,
+        file_id: PathBuf,
+        newparent: PathBuf,
+        newname: &OsStr,
+    ) -> FuseResult<FileAttribute> {
+        let old_rel = Self::to_rel_string(&file_id);
+        let newparent_rel = Self::to_rel_string(&newparent);
+        let new_path = Self::join_child(&newparent, newname);
+        let new_rel = Self::to_rel_string(&new_path);
+        debug!(
+            old = %Self::display_path(&file_id),
+            newparent = %Self::display_path(&newparent),
+            newname = %newname.to_string_lossy(),
+            "FUSE link"
+        );
+
+        let old_resolved = self.manifest.read().resolve(&old_rel);
+        let new_target = self.manifest.read().create_target(&newparent_rel);
+
+        let old_backend = match &old_resolved {
+            Some(ResolvedPath::Real(rel)) => self.real_root.join(rel),
+            Some(ResolvedPath::Layer(p)) => p.clone(),
+            None => return Err(Self::file_not_found(&file_id)),
+        };
+
+        let new_backend = match &new_target {
+            ResolvedPath::Real(rel) => {
+                if rel.is_empty() {
+                    self.real_root.join(newname)
+                } else {
+                    self.real_root.join(rel).join(newname)
+                }
+            }
+            ResolvedPath::Layer(dir) => dir.join(newname),
+        };
+
+        // Create hard link
+        std::fs::hard_link(&old_backend, &new_backend).map_err(|e| {
+            PosixError::new(ErrorKind::InputOutputError, e.to_string())
+        })?;
+
+        let attr = unix_fs::lookup(&new_backend)?;
+        self.manifest
+            .write()
+            .add_entry_with_backend(&new_rel, new_backend, false);
+        Ok(self.with_ttl(attr))
+    }
+
     fn unlink(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<()> {
         let child_path = Self::join_child(&parent_id, name);
         let child_rel = Self::to_rel_string(&child_path);
