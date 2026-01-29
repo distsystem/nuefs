@@ -9,7 +9,7 @@ from typing import Annotated
 import pydantic
 from rich.panel import Panel
 from rich.tree import Tree
-from sheaves.annotations import Commands, Flag, Readonly
+from sheaves.annotations import Commands, Flag, Option, Readonly
 from sheaves.cli import Command, cli
 from sheaves.console import console
 
@@ -47,7 +47,9 @@ class NueBaseCommand(Manifest, Command, app_name="nue"):
 
 
 class Mount(NueBaseCommand):
-    dry_run: Annotated[bool, Flag(help="Show virtual tree without mounting", short="-n")] = False
+    dry_run: Annotated[
+        bool, Flag(help="Show virtual tree without mounting", short="-n")
+    ] = False
 
     def run(self) -> None:
         cwd = os.getcwd()
@@ -130,18 +132,33 @@ class Mount(NueBaseCommand):
         console.print(tree)
 
 
-class Unmount(NueBaseCommand):
+class Unmount(Command, app_name="nue"):
+    root: Annotated[
+        pathlib.Path,
+        Option(help="Mount root path to unmount", short="-r", metavar="PATH"),
+    ] = pathlib.Path(".")
+
     def run(self) -> None:
-        cwd = os.getcwd()
-        root = os.fspath(self.root)
+        root_path = self.root.expanduser()
+        root = os.path.normpath(os.path.abspath(os.fspath(root_path)))
         os.chdir("/")
 
-        # If the caller is currently inside the mountpoint, a normal unmount will be EBUSY.
-        if cwd == root or cwd.startswith(f"{root}{os.sep}"):
-            _lazy_unmount(pathlib.Path(root))
+        socket_path = nuefs.default_socket_path()
+        if not _daemon_running(socket_path):
+            try:
+                _lazy_unmount(pathlib.Path(root))
+            except RuntimeError:
+                pass
             return
 
-        nuefs.open(pathlib.Path(root)).close()
+        for h in nuefs.status():
+            if os.path.normpath(h.root) == root:
+                h.close()
+                return
+
+
+class Umount(Unmount):
+    pass
 
 
 class Status(NueBaseCommand):
@@ -174,8 +191,7 @@ class Start(NueBaseCommand):
             info = nuefs.daemon_info()
             console.print(
                 Panel(
-                    f"[bold]pid:[/] {info.pid}\n"
-                    f"[bold]socket:[/] {info.socket}",
+                    f"[bold]pid:[/] {info.pid}\n[bold]socket:[/] {info.socket}",
                     title="nuefsd already running",
                     border_style="yellow",
                 )
@@ -236,8 +252,7 @@ class Start(NueBaseCommand):
         info = nuefs.daemon_info()
         console.print(
             Panel(
-                f"[bold]pid:[/] {info.pid}\n"
-                f"[bold]socket:[/] {info.socket}",
+                f"[bold]pid:[/] {info.pid}\n[bold]socket:[/] {info.socket}",
                 title="nuefsd started",
                 border_style="green",
             )
@@ -330,7 +345,7 @@ class Stop(NueBaseCommand):
 
 
 def main() -> int:
-    cli(Annotated[Mount | Unmount | Status | Start | Stop, Commands()]).run()
+    cli(Annotated[Mount | Unmount | Umount | Status | Start | Stop, Commands()]).run()
     return 0
 
 
