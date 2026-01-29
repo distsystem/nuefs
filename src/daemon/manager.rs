@@ -217,16 +217,19 @@ impl Manager {
     }
 }
 
-/// Source of a file/directory.
-#[derive(Clone, Debug)]
-enum Source {
-    Real,
-    Layer { backend_path: PathBuf },
+/// How to access the backend path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccessMethod {
+    /// Use openat(root_fd, rel_path) - for paths under the mount root
+    Openat,
+    /// Use absolute path - for external layer paths
+    Absolute,
 }
 
 #[derive(Clone, Debug)]
 struct Entry {
-    source: Source,
+    backend_path: PathBuf,
+    access: AccessMethod,
     is_dir: bool,
 }
 
@@ -234,17 +237,36 @@ struct Entry {
 #[derive(Clone, Debug)]
 pub(crate) enum ResolvedPath {
     /// Path is relative to the mount root (use openat with root_fd)
-    Real(String),
-    /// Path is an absolute path to a layer backend
-    Layer(PathBuf),
+    Openat(String),
+    /// Path is an absolute path (external layer)
+    Absolute(PathBuf),
+}
+
+impl ResolvedPath {
+    /// Convert to absolute path, using root for Openat paths.
+    pub(crate) fn to_path(&self, root: &PathBuf) -> PathBuf {
+        match self {
+            Self::Openat(rel) => root.join(rel),
+            Self::Absolute(p) => p.clone(),
+        }
+    }
+
+    /// Check if this is an Openat path.
+    pub(crate) fn is_openat(&self) -> bool {
+        matches!(self, Self::Openat(_))
+    }
 }
 
 /// Result of readdir operation.
 pub(crate) enum ReaddirResult {
-    /// Directory is in a Layer, children already read
-    Layer(Vec<(String, bool)>),
-    /// Directory is Real, caller should use openat to read
-    Real(String),
+    /// Directory is external (absolute path), children already read
+    Absolute(Vec<(String, bool)>),
+    /// Directory is under mount root, caller should use openat to read
+    /// and merge with returned manifest children
+    Openat {
+        rel_path: String,
+        manifest_children: Vec<(String, bool)>,
+    },
 }
 
 /// Manifest: maps virtual paths to their backend sources.
@@ -287,17 +309,16 @@ impl Manifest {
     ) -> Self {
         let mut map = HashMap::new();
         for e in entries {
-            let source = if e.backend_path.starts_with(&display_root) {
-                Source::Real
+            let access = if e.backend_path.starts_with(&display_root) {
+                AccessMethod::Openat
             } else {
-                Source::Layer {
-                    backend_path: e.backend_path,
-                }
+                AccessMethod::Absolute
             };
             map.insert(
                 e.virtual_path,
                 Entry {
-                    source,
+                    backend_path: e.backend_path,
+                    access,
                     is_dir: e.is_dir,
                 },
             );
@@ -313,27 +334,29 @@ impl Manifest {
 
         // Try exact match first
         if let Some(entry) = self.entries.get(path) {
-            return Some(match &entry.source {
-                Source::Real => OwnerInfoWire {
-                    owner: "real".to_string(),
-                    backend_path: self.display_root.join(path),
-                },
-                Source::Layer { backend_path } => OwnerInfoWire {
-                    owner: "layer".to_string(),
-                    backend_path: backend_path.clone(),
-                },
+            let owner = match entry.access {
+                AccessMethod::Openat => "real",
+                AccessMethod::Absolute => "layer",
+            };
+            return Some(OwnerInfoWire {
+                owner: owner.to_string(),
+                backend_path: entry.backend_path.clone(),
             });
         }
 
-        // Try prefix match for Layer directories
-        if let Some((backend_path, suffix)) = self.find_prefix_match(path) {
+        // Try prefix match for any directory entry
+        if let Some((entry, suffix)) = self.find_prefix_match(path) {
             let full_path = if suffix.is_empty() {
-                backend_path.clone()
+                entry.backend_path.clone()
             } else {
-                backend_path.join(&suffix)
+                entry.backend_path.join(&suffix)
+            };
+            let owner = match entry.access {
+                AccessMethod::Openat => "real",
+                AccessMethod::Absolute => "layer",
             };
             return Some(OwnerInfoWire {
-                owner: "layer".to_string(),
+                owner: owner.to_string(),
                 backend_path: full_path,
             });
         }
@@ -347,36 +370,40 @@ impl Manifest {
 
     /// Resolve a virtual path to a ResolvedPath.
     /// Returns None only if the path doesn't exist in entries and has no prefix match.
-    /// For Real paths, the caller should verify existence using openat.
+    /// For Openat paths, the caller should verify existence using openat.
     pub(crate) fn resolve(&self, path: &str) -> Option<ResolvedPath> {
         let path = path.trim_start_matches('/');
 
         // Try exact match first
         if let Some(entry) = self.entries.get(path) {
-            return Some(match &entry.source {
-                Source::Real => ResolvedPath::Real(path.to_string()),
-                Source::Layer { backend_path, .. } => ResolvedPath::Layer(backend_path.clone()),
+            return Some(match entry.access {
+                AccessMethod::Openat => ResolvedPath::Openat(path.to_string()),
+                AccessMethod::Absolute => ResolvedPath::Absolute(entry.backend_path.clone()),
             });
         }
 
-        // Try prefix match for Layer directories
-        if let Some((backend_path, suffix)) = self.find_prefix_match(path) {
+        // Try prefix match for any directory entry
+        if let Some((entry, suffix)) = self.find_prefix_match(path) {
             let resolved = if suffix.is_empty() {
-                backend_path
+                entry.backend_path.clone()
             } else {
-                backend_path.join(&suffix)
+                entry.backend_path.join(&suffix)
             };
-            return Some(ResolvedPath::Layer(resolved));
+            return Some(match entry.access {
+                AccessMethod::Openat => ResolvedPath::Openat(path.to_string()),
+                AccessMethod::Absolute => ResolvedPath::Absolute(resolved),
+            });
         }
 
         // Fallback: assume real path (caller will verify existence using openat)
-        Some(ResolvedPath::Real(path.to_string()))
+        Some(ResolvedPath::Openat(path.to_string()))
     }
 
     /// Find the longest matching prefix entry for a path.
-    /// Returns (backend_path, suffix) where the path maps to backend_path/suffix
-    fn find_prefix_match(&self, path: &str) -> Option<(PathBuf, String)> {
-        let mut best_match: Option<(PathBuf, String)> = None;
+    /// Returns (&Entry, suffix) where the path maps to entry.backend_path/suffix.
+    /// Now matches ALL directory entries (not just external layers).
+    fn find_prefix_match(&self, path: &str) -> Option<(&Entry, String)> {
+        let mut best_match: Option<(&Entry, String)> = None;
         let mut best_len = 0;
 
         for (entry_path, entry) in &self.entries {
@@ -390,11 +417,9 @@ impl Manifest {
                 // Must be followed by "/" or be exact match
                 if rest.is_empty() || rest.starts_with('/') {
                     if entry_path.len() > best_len {
-                        if let Source::Layer { backend_path } = &entry.source {
-                            best_len = entry_path.len();
-                            let suffix = rest.trim_start_matches('/').to_string();
-                            best_match = Some((backend_path.clone(), suffix));
-                        }
+                        best_len = entry_path.len();
+                        let suffix = rest.trim_start_matches('/').to_string();
+                        best_match = Some((entry, suffix));
                     }
                 }
             }
@@ -405,51 +430,79 @@ impl Manifest {
 
     /// Read directory contents.
     ///
-    /// Returns `ReaddirResult::Layer` with children if the path resolves to a Layer,
-    /// or `ReaddirResult::Real` with relative path if the caller should read using openat.
+    /// Returns `ReaddirResult::Absolute` if the path resolves to an external layer (children already read),
+    /// or `ReaddirResult::Openat` with relative path and manifest children for the caller to merge.
     pub(crate) fn readdir(&self, path: &str) -> ReaddirResult {
         let prefix = path.trim_start_matches('/');
 
-        // For root directory or directories with Layer children, we need to return
-        // the children from entries (since they may include both Real and Layer items)
-        let direct_children = self.entry_names_at(prefix);
-        if !direct_children.is_empty() {
-            // We have explicit entries for this directory - return them with is_dir info
-            let children: Vec<(String, bool)> = direct_children
-                .into_iter()
-                .filter_map(|name| {
-                    let child_path = if prefix.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{prefix}/{name}")
-                    };
-                    self.entries.get(&child_path).map(|e| (name, e.is_dir))
-                })
-                .collect();
-            return ReaddirResult::Layer(children);
-        }
+        // Collect manifest children at this prefix (for merging in FUSE layer)
+        let manifest_children: Vec<(String, bool)> = self
+            .entry_names_at(prefix)
+            .into_iter()
+            .filter_map(|name| {
+                let child_path = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                self.entries.get(&child_path).map(|e| (name, e.is_dir))
+            })
+            .collect();
 
-        // First, try to find if this path maps to a Layer directory
+        // Try exact match first
         if let Some(entry) = self.entries.get(prefix) {
-            if let Source::Layer { backend_path } = &entry.source {
-                if entry.is_dir {
-                    return ReaddirResult::Layer(self.readdir_from_backend(backend_path));
-                }
+            if entry.is_dir {
+                return match entry.access {
+                    AccessMethod::Absolute => {
+                        // External layer: read children directly and merge with manifest
+                        let mut children = self.readdir_from_backend(&entry.backend_path);
+                        // Add manifest children that aren't already present
+                        let existing: std::collections::HashSet<String> =
+                            children.iter().map(|(n, _)| n.clone()).collect();
+                        for (name, is_dir) in manifest_children {
+                            if !existing.contains(&name) {
+                                children.push((name, is_dir));
+                            }
+                        }
+                        ReaddirResult::Absolute(children)
+                    }
+                    AccessMethod::Openat => {
+                        // Under mount root: return for openat with manifest children
+                        ReaddirResult::Openat {
+                            rel_path: prefix.to_string(),
+                            manifest_children,
+                        }
+                    }
+                };
             }
         }
 
-        // Try prefix match
-        if let Some((backend_path, suffix)) = self.find_prefix_match(prefix) {
+        // Try prefix match for any directory entry
+        if let Some((entry, suffix)) = self.find_prefix_match(prefix) {
             let target = if suffix.is_empty() {
-                backend_path
+                entry.backend_path.clone()
             } else {
-                backend_path.join(&suffix)
+                entry.backend_path.join(&suffix)
             };
-            return ReaddirResult::Layer(self.readdir_from_backend(&target));
+            return match entry.access {
+                AccessMethod::Absolute => {
+                    ReaddirResult::Absolute(self.readdir_from_backend(&target))
+                }
+                AccessMethod::Openat => {
+                    // This is a subdirectory under a registered Openat directory
+                    ReaddirResult::Openat {
+                        rel_path: prefix.to_string(),
+                        manifest_children,
+                    }
+                }
+            };
         }
 
-        // For Real paths, return the relative path so caller can use openat
-        ReaddirResult::Real(prefix.to_string())
+        // Fallback: assume under mount root
+        ReaddirResult::Openat {
+            rel_path: prefix.to_string(),
+            manifest_children,
+        }
     }
 
     /// Read directory contents directly from a backend path.
@@ -475,14 +528,20 @@ impl Manifest {
     ) {
         let path = path.trim_start_matches('/');
 
-        let source = if backend_path.starts_with(&self.display_root) {
-            Source::Real
+        let access = if backend_path.starts_with(&self.display_root) {
+            AccessMethod::Openat
         } else {
-            Source::Layer { backend_path }
+            AccessMethod::Absolute
         };
 
-        self.entries
-            .insert(path.to_string(), Entry { source, is_dir });
+        self.entries.insert(
+            path.to_string(),
+            Entry {
+                backend_path,
+                access,
+                is_dir,
+            },
+        );
     }
 
     pub(crate) fn remove_entry(&mut self, path: &str) {
@@ -533,61 +592,61 @@ impl Manifest {
                 }
             };
 
-            let entry = match entry.source {
-                Source::Layer { backend_path } => {
-                    // If this entry came from the renamed backend, update its backend path too.
-                    let updated = backend_path
-                        .strip_prefix(old_backend)
-                        .ok()
-                        .map(|suffix| {
-                            if suffix.as_os_str().is_empty() {
-                                new_backend.clone()
-                            } else {
-                                new_backend.join(suffix)
-                            }
-                        })
-                        .unwrap_or(backend_path);
-
-                    Entry {
-                        source: Source::Layer {
-                            backend_path: updated,
-                        },
-                        is_dir: entry.is_dir,
+            // Update backend_path if it was under the old backend
+            let updated_backend = entry
+                .backend_path
+                .strip_prefix(old_backend)
+                .ok()
+                .map(|suffix| {
+                    if suffix.as_os_str().is_empty() {
+                        new_backend.clone()
+                    } else {
+                        new_backend.join(suffix)
                     }
-                }
-                Source::Real => entry,
-            };
+                })
+                .unwrap_or(entry.backend_path);
 
-            self.entries.insert(new_key, entry);
+            self.entries.insert(
+                new_key,
+                Entry {
+                    backend_path: updated_backend,
+                    access: entry.access,
+                    is_dir: entry.is_dir,
+                },
+            );
         }
     }
 
     /// Returns the target directory for creating new files/directories.
-    /// For Layer paths, returns the absolute backend path.
-    /// For Real paths, returns relative path for caller to use with openat.
+    /// For Absolute (layer) paths, returns the absolute backend path.
+    /// For Openat paths, returns relative path for caller to use with openat.
     pub(crate) fn create_target(&self, parent_path: &str) -> ResolvedPath {
         let parent_path = parent_path.trim_start_matches('/');
 
         // Try exact match first
         if let Some(entry) = self.entries.get(parent_path) {
-            if let Source::Layer { backend_path, .. } = &entry.source {
-                if entry.is_dir {
-                    return ResolvedPath::Layer(backend_path.clone());
-                }
+            if entry.is_dir {
+                return match entry.access {
+                    AccessMethod::Openat => ResolvedPath::Openat(parent_path.to_string()),
+                    AccessMethod::Absolute => ResolvedPath::Absolute(entry.backend_path.clone()),
+                };
             }
         }
 
-        // Try prefix match
-        if let Some((backend_path, suffix)) = self.find_prefix_match(parent_path) {
+        // Try prefix match for any directory entry
+        if let Some((entry, suffix)) = self.find_prefix_match(parent_path) {
             let target = if suffix.is_empty() {
-                backend_path
+                entry.backend_path.clone()
             } else {
-                backend_path.join(&suffix)
+                entry.backend_path.join(&suffix)
             };
-            return ResolvedPath::Layer(target);
+            return match entry.access {
+                AccessMethod::Openat => ResolvedPath::Openat(parent_path.to_string()),
+                AccessMethod::Absolute => ResolvedPath::Absolute(target),
+            };
         }
 
-        // Real path
-        ResolvedPath::Real(parent_path.to_string())
+        // Fallback: Openat path
+        ResolvedPath::Openat(parent_path.to_string())
     }
 }

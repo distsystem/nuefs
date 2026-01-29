@@ -92,3 +92,8 @@ def status() -> list[Handle]:
 def daemon_info() -> DaemonInfo:
     """Get information about the daemon process."""
     return _ext._daemon_info()
+
+
+def default_socket_path() -> pathlib.Path:
+    """Get the default socket path for the daemon."""
+    return pathlib.Path(_ext._default_socket_path())

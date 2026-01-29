@@ -112,7 +112,7 @@ impl NueFs {
     /// Remove a file or directory, using *at syscalls for Real paths.
     fn remove_at(&self, rel_path: &str, is_dir: bool) -> FuseResult<()> {
         match self.manifest.read().resolve(rel_path) {
-            Some(ResolvedPath::Real(rel)) => {
+            Some(ResolvedPath::Openat(rel)) => {
                 let c_path = Self::to_cstring(&rel).map_err(|_| {
                     PosixError::new(ErrorKind::InvalidArgument, "invalid path")
                 })?;
@@ -126,7 +126,7 @@ impl NueFs {
                 }
                 Ok(())
             }
-            Some(ResolvedPath::Layer(p)) => {
+            Some(ResolvedPath::Absolute(p)) => {
                 if is_dir {
                     unix_fs::rmdir(&p)
                 } else {
@@ -134,6 +134,209 @@ impl NueFs {
                 }
             }
             None => Err(ErrorKind::FileNotFound.to_error("not found")),
+        }
+    }
+
+    /// Set file attributes using *at syscalls (avoids FUSE deadlock).
+    fn setattr_relative(&self, rel_path: &str, request: &SetAttrRequest) -> std::io::Result<libc::stat> {
+        let c_path = Self::to_cstring(rel_path)?;
+
+        // chmod
+        if let Some(mode) = request.mode {
+            let result = unsafe {
+                libc::fchmodat(
+                    self.real_root_fd.as_raw_fd(),
+                    c_path.as_ptr(),
+                    mode,
+                    0,
+                )
+            };
+            if result < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+
+        // chown
+        if request.uid.is_some() || request.gid.is_some() {
+            let uid = request.uid.map(|u| u as libc::uid_t).unwrap_or(u32::MAX);
+            let gid = request.gid.map(|g| g as libc::gid_t).unwrap_or(u32::MAX);
+            let result = unsafe {
+                libc::fchownat(
+                    self.real_root_fd.as_raw_fd(),
+                    c_path.as_ptr(),
+                    uid,
+                    gid,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if result < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+
+        // truncate
+        if let Some(size) = request.size {
+            let file = self.open_relative_with_flags(rel_path, libc::O_WRONLY)?;
+            let result = unsafe { libc::ftruncate(file.as_raw_fd(), size as libc::off_t) };
+            if result < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+
+        // utimens
+        if request.atime.is_some() || request.mtime.is_some() {
+            let to_timespec = |t: Option<fuser::TimeOrNow>| -> libc::timespec {
+                match t {
+                    Some(fuser::TimeOrNow::Now) => libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: libc::UTIME_NOW,
+                    },
+                    Some(fuser::TimeOrNow::SpecificTime(st)) => {
+                        let d = st.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                        libc::timespec {
+                            tv_sec: d.as_secs() as libc::time_t,
+                            tv_nsec: d.subsec_nanos() as libc::c_long,
+                        }
+                    }
+                    None => libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: libc::UTIME_OMIT,
+                    },
+                }
+            };
+            let times = [to_timespec(request.atime), to_timespec(request.mtime)];
+            let result = unsafe {
+                libc::utimensat(
+                    self.real_root_fd.as_raw_fd(),
+                    c_path.as_ptr(),
+                    times.as_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if result < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+
+        self.lstat_relative(rel_path)
+    }
+
+    /// Create hard link using linkat (avoids FUSE deadlock).
+    fn link_relative(&self, old_rel: &str, new_rel: &str) -> std::io::Result<()> {
+        let c_old = Self::to_cstring(old_rel)?;
+        let c_new = Self::to_cstring(new_rel)?;
+
+        let result = unsafe {
+            libc::linkat(
+                self.real_root_fd.as_raw_fd(),
+                c_old.as_ptr(),
+                self.real_root_fd.as_raw_fd(),
+                c_new.as_ptr(),
+                0,
+            )
+        };
+
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Create symlink using symlinkat (avoids FUSE deadlock).
+    fn symlink_relative(&self, rel_path: &str, target: &Path) -> std::io::Result<()> {
+        let c_link = Self::to_cstring(rel_path)?;
+        let c_target = CString::new(target.as_os_str().as_encoded_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid target"))?;
+
+        let result = unsafe {
+            libc::symlinkat(
+                c_target.as_ptr(),
+                self.real_root_fd.as_raw_fd(),
+                c_link.as_ptr(),
+            )
+        };
+
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Read symlink target using readlinkat (avoids FUSE deadlock).
+    fn readlink_relative(&self, rel_path: &str) -> std::io::Result<Vec<u8>> {
+        let c_path = Self::to_cstring(rel_path)?;
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+
+        let len = unsafe {
+            libc::readlinkat(
+                self.real_root_fd.as_raw_fd(),
+                c_path.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+            )
+        };
+
+        if len < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        buf.truncate(len as usize);
+        Ok(buf)
+    }
+
+    /// Get file attributes using fstatat (lstat equivalent for relative paths).
+    /// This avoids path resolution through the FUSE mount.
+    fn lstat_relative(&self, rel_path: &str) -> std::io::Result<libc::stat> {
+        let c_path = Self::to_cstring(rel_path)?;
+        let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+
+        let result = unsafe {
+            libc::fstatat(
+                self.real_root_fd.as_raw_fd(),
+                c_path.as_ptr(),
+                &mut stat_buf,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(stat_buf)
+    }
+
+    /// Convert libc::stat to FileAttribute
+    fn stat_to_attr(&self, stat: &libc::stat) -> FileAttribute {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let kind = match stat.st_mode & libc::S_IFMT {
+            libc::S_IFDIR => FileKind::Directory,
+            libc::S_IFLNK => FileKind::Symlink,
+            libc::S_IFREG => FileKind::RegularFile,
+            _ => FileKind::RegularFile,
+        };
+
+        let atime = UNIX_EPOCH + Duration::new(stat.st_atime as u64, stat.st_atime_nsec as u32);
+        let mtime = UNIX_EPOCH + Duration::new(stat.st_mtime as u64, stat.st_mtime_nsec as u32);
+        let ctime = UNIX_EPOCH + Duration::new(stat.st_ctime as u64, stat.st_ctime_nsec as u32);
+
+        FileAttribute {
+            size: stat.st_size as u64,
+            blocks: stat.st_blocks as u64,
+            atime,
+            mtime,
+            ctime,
+            crtime: ctime, // Use ctime as fallback for crtime
+            kind,
+            perm: (stat.st_mode & 0o7777) as u16,
+            nlink: stat.st_nlink as u32,
+            uid: stat.st_uid,
+            gid: stat.st_gid,
+            rdev: stat.st_rdev as u32,
+            blksize: stat.st_blksize as u32,
+            flags: 0,
+            generation: Some(0),
+            ttl: Some(self.get_default_ttl()),
         }
     }
 
@@ -278,28 +481,50 @@ impl NueFs {
     }
 
     fn get_file_attr(&self, rel_path: &str) -> FuseResult<FileAttribute> {
-        match self.manifest.read().resolve(rel_path) {
-            Some(ResolvedPath::Real(rel)) => self
-                .open_relative(&rel)
-                .map_err(Self::map_io_error)
-                .and_then(|f| unix_fs::getattr(f.as_fd()).map(|a| self.with_ttl(a))),
-            Some(ResolvedPath::Layer(path)) => {
+        debug!(path = %rel_path, "get_file_attr: acquiring read lock");
+        let resolved = self.manifest.read().resolve(rel_path);
+        debug!(path = %rel_path, resolved = ?resolved, "get_file_attr: lock released");
+
+        match resolved {
+            Some(ResolvedPath::Openat(rel)) => {
+                debug!(path = %rel_path, rel = %rel, "get_file_attr: Openat mode");
+                // Try open_relative first; if it fails (e.g., for symlinks with O_NOFOLLOW),
+                // fall back to lstat_relative which uses fstatat
+                match self.open_relative(&rel) {
+                    Ok(f) => unix_fs::getattr(f.as_fd()).map(|a| self.with_ttl(a)),
+                    Err(e) => {
+                        debug!(path = %rel_path, error = %e, "get_file_attr: openat failed, trying fstatat");
+                        // Fallback: use fstatat (lstat) for symlinks - avoids FUSE deadlock
+                        self.lstat_relative(&rel)
+                            .map(|stat| self.stat_to_attr(&stat))
+                            .map_err(|e| {
+                                debug!(path = %rel_path, error = %e, "get_file_attr: fstatat also failed");
+                                ErrorKind::FileNotFound.to_error(e.to_string())
+                            })
+                    }
+                }
+            }
+            Some(ResolvedPath::Absolute(path)) => {
+                debug!(path = %rel_path, backend = %path.display(), "get_file_attr: Absolute mode");
                 unix_fs::lookup(&path).map(|a| self.with_ttl(a))
             }
-            None => Err(ErrorKind::FileNotFound.to_error("not found")),
+            None => {
+                debug!(path = %rel_path, "get_file_attr: not found");
+                Err(ErrorKind::FileNotFound.to_error("not found"))
+            }
         }
     }
 
     fn resolve_backend_path(&self, resolved: &ResolvedPath, name: &OsStr) -> PathBuf {
         match resolved {
-            ResolvedPath::Real(rel) => {
+            ResolvedPath::Openat(rel) => {
                 if rel.is_empty() {
                     self.real_root.join(name)
                 } else {
                     self.real_root.join(rel).join(name)
                 }
             }
-            ResolvedPath::Layer(dir) => dir.join(name),
+            ResolvedPath::Absolute(dir) => dir.join(name),
         }
     }
 
@@ -319,15 +544,22 @@ impl FuseHandler<PathBuf> for NueFs {
 
     fn lookup(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<FileAttribute> {
         let child_path = Self::join_child(&parent_id, name);
+        let child_rel = Self::to_rel_string(&child_path);
         debug!(
             parent = %Self::display_path(&parent_id),
             name = %name.to_string_lossy(),
-            path = %Self::display_path(&child_path),
-            "FUSE lookup"
+            path = %child_rel,
+            "FUSE lookup START"
         );
 
-        self.get_file_attr(&Self::to_rel_string(&child_path))
-            .map_err(|_| Self::file_not_found(&child_path))
+        let result = self.get_file_attr(&child_rel)
+            .map_err(|_| Self::file_not_found(&child_path));
+        debug!(
+            path = %child_rel,
+            ok = result.is_ok(),
+            "FUSE lookup END"
+        );
+        result
     }
 
     fn getattr(
@@ -354,10 +586,21 @@ impl FuseHandler<PathBuf> for NueFs {
         entries.push(("..".into(), FileKind::Directory));
 
         let children = match self.manifest.read().readdir(&rel_path) {
-            ReaddirResult::Layer(children) => children,
-            ReaddirResult::Real(rel) => {
-                // Use openat to read real directory
-                self.readdir_real(&rel).unwrap_or_default()
+            ReaddirResult::Absolute(children) => children,
+            ReaddirResult::Openat {
+                rel_path,
+                manifest_children,
+            } => {
+                // Read real directory using openat and merge with manifest children
+                let mut merged = self.readdir_real(&rel_path).unwrap_or_default();
+                let existing: std::collections::HashSet<String> =
+                    merged.iter().map(|(n, _)| n.clone()).collect();
+                for (name, is_dir) in manifest_children {
+                    if !existing.contains(&name) {
+                        merged.push((name, is_dir));
+                    }
+                }
+                merged
             }
         };
 
@@ -394,12 +637,22 @@ impl FuseHandler<PathBuf> for NueFs {
         }
 
         // Get children
-        let manifest = self.manifest.read();
-        let children = match manifest.readdir(&rel_path) {
-            ReaddirResult::Layer(children) => children,
-            ReaddirResult::Real(rel) => {
-                drop(manifest);
-                self.readdir_real(&rel).unwrap_or_default()
+        let children = match self.manifest.read().readdir(&rel_path) {
+            ReaddirResult::Absolute(children) => children,
+            ReaddirResult::Openat {
+                rel_path,
+                manifest_children,
+            } => {
+                // Read real directory using openat and merge with manifest children
+                let mut merged = self.readdir_real(&rel_path).unwrap_or_default();
+                let existing: std::collections::HashSet<String> =
+                    merged.iter().map(|(n, _)| n.clone()).collect();
+                for (name, is_dir) in manifest_children {
+                    if !existing.contains(&name) {
+                        merged.push((name, is_dir));
+                    }
+                }
+                merged
             }
         };
 
@@ -425,7 +678,7 @@ impl FuseHandler<PathBuf> for NueFs {
         let resolved = self.manifest.read().resolve(&rel_path);
 
         match resolved {
-            Some(ResolvedPath::Real(rel)) => {
+            Some(ResolvedPath::Openat(rel)) => {
                 let libc_flags = flags.bits() as i32;
                 let file = self
                     .open_relative_with_flags(&rel, libc_flags)
@@ -434,7 +687,7 @@ impl FuseHandler<PathBuf> for NueFs {
                     .ok_or_else(Self::bad_file_handle)?;
                 Ok((handle, FUSEOpenResponseFlags::empty()))
             }
-            Some(ResolvedPath::Layer(path)) => {
+            Some(ResolvedPath::Absolute(path)) => {
                 let fd = unix_fs::open(&path, flags)?;
                 let handle = OwnedFileHandle::from_owned_fd(fd).ok_or_else(Self::bad_file_handle)?;
                 Ok((handle, FUSEOpenResponseFlags::empty()))
@@ -469,7 +722,7 @@ impl FuseHandler<PathBuf> for NueFs {
         let create_target = self.manifest.read().create_target(&rel_parent);
 
         match create_target {
-            ResolvedPath::Real(_) => {
+            ResolvedPath::Openat(_) => {
                 // Use openat to avoid FUSE deadlock
                 let libc_flags = flags.bits() as i32;
                 let (file, backend_path) = self
@@ -486,7 +739,7 @@ impl FuseHandler<PathBuf> for NueFs {
 
                 Ok((handle, self.with_ttl(attr), FUSEOpenResponseFlags::empty()))
             }
-            ResolvedPath::Layer(dir) => {
+            ResolvedPath::Absolute(dir) => {
                 // Layer paths are not under FUSE mount, safe to use unix_fs::create
                 let backend_path = dir.join(name);
                 let (fd, attr) = unix_fs::create(&backend_path, mode, umask, flags)?;
@@ -526,7 +779,7 @@ impl FuseHandler<PathBuf> for NueFs {
         let create_target = self.manifest.read().create_target(&rel_parent);
 
         match create_target {
-            ResolvedPath::Real(_) => {
+            ResolvedPath::Openat(_) => {
                 // Use mkdirat to avoid FUSE deadlock
                 let backend_path = self
                     .mkdir_relative(&child_rel, effective_mode)
@@ -544,7 +797,7 @@ impl FuseHandler<PathBuf> for NueFs {
 
                 Ok(self.with_ttl(attr))
             }
-            ResolvedPath::Layer(dir) => {
+            ResolvedPath::Absolute(dir) => {
                 // Layer paths are not under FUSE mount, safe to use unix_fs::mkdir
                 let backend_path = dir.join(name);
                 let attr = unix_fs::mkdir(&backend_path, mode, umask)?;
@@ -562,14 +815,14 @@ impl FuseHandler<PathBuf> for NueFs {
         let rel_path = Self::to_rel_string(&file_id);
         debug!(path = %Self::display_path(&file_id), "FUSE readlink");
 
-        let resolved = self.manifest.read().resolve(&rel_path);
+        let resolved = self.manifest.read().resolve(&rel_path)
+            .ok_or_else(|| Self::file_not_found(&file_id))?;
+
         match resolved {
-            Some(ResolvedPath::Real(rel)) => {
-                let full_path = self.real_root.join(&rel);
-                unix_fs::readlink(&full_path)
+            ResolvedPath::Openat(rel) => {
+                self.readlink_relative(&rel).map_err(Self::map_io_error)
             }
-            Some(ResolvedPath::Layer(path)) => unix_fs::readlink(&path),
-            None => Err(Self::file_not_found(&file_id)),
+            ResolvedPath::Absolute(path) => unix_fs::readlink(&path),
         }
     }
 
@@ -587,28 +840,37 @@ impl FuseHandler<PathBuf> for NueFs {
             parent = %Self::display_path(&parent_id),
             link_name = %link_name.to_string_lossy(),
             target = %target.display(),
-            "FUSE symlink"
+            "FUSE symlink START"
         );
 
+        debug!(path = %child_rel, "symlink: acquiring read lock for create_target");
         let create_target = self.manifest.read().create_target(&parent_rel);
+        debug!(path = %child_rel, target = ?create_target, "symlink: read lock released");
+
+        let backend_path = self.resolve_backend_path(&create_target, link_name);
+
         match create_target {
-            ResolvedPath::Real(_) => {
-                let full_path = self.real_root.join(&child_rel);
-                let attr = unix_fs::symlink(&full_path, target)?;
-                self.manifest
-                    .write()
-                    .add_entry_with_backend(&child_rel, full_path, false);
-                Ok(self.with_ttl(attr))
+            ResolvedPath::Openat(_) => {
+                debug!(path = %child_rel, "symlink: using symlinkat");
+                self.symlink_relative(&child_rel, target)
+                    .map_err(Self::map_io_error)?;
             }
-            ResolvedPath::Layer(dir) => {
-                let backend_path = dir.join(link_name);
-                let attr = unix_fs::symlink(&backend_path, target)?;
-                self.manifest
-                    .write()
-                    .add_entry_with_backend(&child_rel, backend_path, false);
-                Ok(self.with_ttl(attr))
+            ResolvedPath::Absolute(_) => {
+                debug!(path = %child_rel, backend = %backend_path.display(), "symlink: using unix_fs::symlink");
+                unix_fs::symlink(&backend_path, target)?;
             }
         }
+
+        let attr = self.lstat_relative(&child_rel)
+            .map(|stat| self.stat_to_attr(&stat))
+            .map_err(Self::map_io_error)?;
+
+        debug!(path = %child_rel, "symlink: acquiring write lock");
+        self.manifest
+            .write()
+            .add_entry_with_backend(&child_rel, backend_path, false);
+        debug!(path = %child_rel, "symlink: write lock released, done");
+        Ok(self.with_ttl(attr))
     }
 
     fn link(
@@ -629,23 +891,28 @@ impl FuseHandler<PathBuf> for NueFs {
             "FUSE link"
         );
 
-        let old_resolved = self.manifest.read().resolve(&old_rel);
+        let old_resolved = self.manifest.read().resolve(&old_rel)
+            .ok_or_else(|| Self::file_not_found(&file_id))?;
         let new_target = self.manifest.read().create_target(&newparent_rel);
-
-        let old_backend = match &old_resolved {
-            Some(ResolvedPath::Real(rel)) => self.real_root.join(rel),
-            Some(ResolvedPath::Layer(p)) => p.clone(),
-            None => return Err(Self::file_not_found(&file_id)),
-        };
 
         let new_backend = self.resolve_backend_path(&new_target, newname);
 
-        // Create hard link
-        std::fs::hard_link(&old_backend, &new_backend).map_err(|e| {
-            PosixError::new(ErrorKind::InputOutputError, e.to_string())
-        })?;
+        // Use linkat if both paths are under mount root
+        let both_openat = old_resolved.is_openat() && new_target.is_openat();
+        if both_openat {
+            self.link_relative(&old_rel, &new_rel)
+                .map_err(Self::map_io_error)?;
+        } else {
+            let old_backend = old_resolved.to_path(&self.real_root);
+            std::fs::hard_link(&old_backend, &new_backend).map_err(|e| {
+                PosixError::new(ErrorKind::InputOutputError, e.to_string())
+            })?;
+        }
 
-        let attr = unix_fs::lookup(&new_backend)?;
+        let attr = self.lstat_relative(&new_rel)
+            .map(|stat| self.stat_to_attr(&stat))
+            .map_err(Self::map_io_error)?;
+
         self.manifest
             .write()
             .add_entry_with_backend(&new_rel, new_backend, false);
@@ -658,10 +925,13 @@ impl FuseHandler<PathBuf> for NueFs {
         debug!(
             parent = %Self::display_path(&parent_id),
             name = %name.to_string_lossy(),
-            "FUSE unlink"
+            path = %child_rel,
+            "FUSE unlink START"
         );
         self.remove_at(&child_rel, false)?;
+        debug!(path = %child_rel, "unlink: acquiring write lock");
         self.manifest.write().remove_entry(&child_rel);
+        debug!(path = %child_rel, "FUSE unlink END");
         Ok(())
     }
 
@@ -699,27 +969,20 @@ impl FuseHandler<PathBuf> for NueFs {
             "FUSE rename"
         );
 
-        let old_resolved = self.manifest.read().resolve(&old_rel);
+        let old_resolved = self.manifest.read().resolve(&old_rel)
+            .ok_or_else(|| Self::file_not_found(&old_path))?;
         let new_target = self.manifest.read().create_target(&newparent_rel);
 
-        // Check if both are Real paths - can use efficient renameat
-        let both_real = matches!(&old_resolved, Some(ResolvedPath::Real(_)))
-            && matches!(&new_target, ResolvedPath::Real(_));
+        // Use efficient renameat if both are under mount root
+        let both_openat = old_resolved.is_openat() && new_target.is_openat();
 
-        // Compute backend paths for manifest update
-        let old_backend = match &old_resolved {
-            Some(ResolvedPath::Real(rel)) => self.real_root.join(rel),
-            Some(ResolvedPath::Layer(p)) => p.clone(),
-            None => return Err(Self::file_not_found(&old_path)),
-        };
+        let old_backend = old_resolved.to_path(&self.real_root);
         let new_backend = self.resolve_backend_path(&new_target, newname);
 
-        // Perform rename
-        if both_real {
+        if both_openat {
             self.rename_at(&old_rel, &new_rel, flags.bits())
                 .map_err(|e| PosixError::new(ErrorKind::InputOutputError, e.to_string()))?;
         } else {
-            // For mixed Real/Layer renames, use full paths bypassing FUSE
             unix_fs::rename(&old_backend, &new_backend, flags)?;
         }
 
@@ -740,20 +1003,17 @@ impl FuseHandler<PathBuf> for NueFs {
     ) -> FuseResult<FileAttribute> {
         debug!(path = %Self::display_path(&file_id), "FUSE setattr");
         let rel_path = Self::to_rel_string(&file_id);
-        let resolved = self.manifest.read().resolve(&rel_path);
+        let resolved = self.manifest.read().resolve(&rel_path)
+            .ok_or_else(|| Self::file_not_found(&file_id))?;
 
-        match resolved {
-            Some(ResolvedPath::Real(rel)) => {
-                // Build full path bypassing FUSE
-                let full_path = self.real_root.join(&rel);
-                let attr = unix_fs::setattr(&full_path, request)?;
-                Ok(self.with_ttl(attr))
+        let attr = match resolved {
+            ResolvedPath::Openat(_) => {
+                self.setattr_relative(&rel_path, &request)
+                    .map(|stat| self.stat_to_attr(&stat))
+                    .map_err(Self::map_io_error)?
             }
-            Some(ResolvedPath::Layer(path)) => {
-                let attr = unix_fs::setattr(&path, request)?;
-                Ok(self.with_ttl(attr))
-            }
-            None => Err(Self::file_not_found(&file_id)),
-        }
+            ResolvedPath::Absolute(path) => unix_fs::setattr(&path, request)?,
+        };
+        Ok(self.with_ttl(attr))
     }
 }

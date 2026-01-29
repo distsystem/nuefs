@@ -17,7 +17,7 @@ thiserror = "2"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 tarpc = { version = "0.35", features = ["tokio1", "serde-transport-bincode", "unix"] }
-tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "macros"] }
 futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

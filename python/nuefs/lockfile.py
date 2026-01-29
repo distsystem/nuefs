@@ -54,7 +54,6 @@ class Lock(Sheaf):
         root: pathlib.Path,
         mounts: typing.Iterable[MountLayer | tuple[pathlib.Path, str]] = (),
         *,
-        include_real: bool = True,
         nuefs_version: str | None = None,
         manifest_path: str = "nue.yaml",
     ) -> "Lock":
@@ -62,32 +61,20 @@ class Lock(Sheaf):
 
         entries: dict[str, _ext.ManifestEntry] = {}
 
-        if include_real and root.exists():
-            for dirpath, dirnames, filenames in os.walk(root):
-                # Prune skip dirs in-place to avoid descending
-                dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-
-                dp = pathlib.Path(dirpath)
-                for name in dirnames:
-                    path = dp / name
-                    rel = str(path.relative_to(root))
-                    entries[rel] = _ext.ManifestEntry(
-                        virtual_path=rel,
-                        backend_path=path,
-                        is_dir=True,
-                    )
-                for name in filenames:
-                    path = dp / name
-                    try:
-                        is_dir = path.is_dir()
-                    except (PermissionError, OSError):
-                        continue
-                    rel = str(path.relative_to(root))
-                    entries[rel] = _ext.ManifestEntry(
-                        virtual_path=rel,
-                        backend_path=path,
-                        is_dir=is_dir,
-                    )
+        # Minimal cover: only register top-level entries, not recursive.
+        # FUSE layer will use openat to read subdirectory contents dynamically.
+        if root.exists():
+            for item in root.iterdir():
+                name = item.name
+                try:
+                    is_dir = item.is_dir() and not item.is_symlink()
+                except (PermissionError, OSError):
+                    continue
+                entries[name] = _ext.ManifestEntry(
+                    virtual_path=name,
+                    backend_path=item.resolve() if not item.is_symlink() else item,
+                    is_dir=is_dir,
+                )
 
         for mount in mounts:
             if isinstance(mount, MountLayer):
@@ -162,46 +149,22 @@ class Lock(Sheaf):
         if not source.exists():
             return
 
-        # Add the target directory itself (e.g., "sheaves" -> /path/to/sheaves)
+        # Minimal cover: only register the target directory (or top-level items if target=".").
+        # FUSE layer will read contents dynamically via readdir_from_backend.
         if target != ".":
             entries[target] = _ext.ManifestEntry(
                 virtual_path=target,
                 backend_path=source,
                 is_dir=True,
             )
-
-        # Walk the source directory and apply exclude/include filtering
-        for dirpath, dirnames, filenames in os.walk(source):
-            dp = pathlib.Path(dirpath)
-            rel_dir = str(dp.relative_to(source)) if dp != source else ""
-
-            # Prune excluded and skip dirs
-            dirnames[:] = [
-                d for d in dirnames
-                if d not in SKIP_DIRS and not is_excluded(f"{rel_dir}/{d}" if rel_dir else d, is_dir=True)
-            ]
-
-            for name in dirnames:
-                rel_path = f"{rel_dir}/{name}" if rel_dir else name
-                virtual = f"{target}/{rel_path}" if target != "." else rel_path
-                entries[virtual] = _ext.ManifestEntry(
-                    virtual_path=virtual,
-                    backend_path=dp / name,
-                    is_dir=True,
-                )
-
-            for name in filenames:
-                rel_path = f"{rel_dir}/{name}" if rel_dir else name
-                if is_excluded(rel_path):
+        else:
+            # Merge into root: register top-level items from source
+            for item in source.iterdir():
+                name = item.name
+                if name in SKIP_DIRS or is_excluded(name, is_dir=item.is_dir()):
                     continue
-                virtual = f"{target}/{rel_path}" if target != "." else rel_path
-                path = dp / name
-                try:
-                    is_dir = path.is_dir()
-                except (PermissionError, OSError):
-                    continue
-                entries[virtual] = _ext.ManifestEntry(
-                    virtual_path=virtual,
-                    backend_path=path,
-                    is_dir=is_dir,
+                entries[name] = _ext.ManifestEntry(
+                    virtual_path=name,
+                    backend_path=item,
+                    is_dir=item.is_dir() and not item.is_symlink(),
                 )

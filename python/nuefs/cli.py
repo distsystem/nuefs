@@ -164,6 +164,114 @@ class Status(NueBaseCommand):
         console.print(Panel("\n".join(lines), title="nuefsd", border_style="dim"))
 
 
+class Start(NueBaseCommand):
+    background: Annotated[bool, Flag("-b", "--background")] = False
+
+    def run(self) -> None:
+        socket_path = nuefs.default_socket_path()
+
+        if _daemon_running(socket_path):
+            info = nuefs.daemon_info()
+            console.print(
+                Panel(
+                    f"[bold]pid:[/] {info.pid}\n"
+                    f"[bold]socket:[/] {info.socket}",
+                    title="nuefsd already running",
+                    border_style="yellow",
+                )
+            )
+            return
+
+        daemon_bin = os.environ.get("NUEFSD_BIN") or _find_nuefsd()
+        cmd = [daemon_bin, "--socket", str(socket_path)]
+
+        if self.background:
+            self._start_background(cmd, socket_path)
+        else:
+            self._start_foreground(cmd)
+
+    def _start_foreground(self, cmd: list[str]) -> None:
+        cmd = [*cmd, "--log", "-"]
+        console.print(f"[dim]Starting: {' '.join(cmd)}[/]")
+        os.chdir("/")
+        os.execvp(cmd[0], cmd)
+
+    def _start_background(self, cmd: list[str], socket_path: pathlib.Path) -> None:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            cwd="/",
+        )
+
+        time.sleep(0.1)
+        ret = proc.poll()
+        if ret is not None:
+            stderr = proc.stderr.read().decode() if proc.stderr else ""
+            console.print(
+                Panel(
+                    f"daemon exited with code {ret}\n{stderr}",
+                    title="nue start failed",
+                    border_style="red",
+                )
+            )
+            raise SystemExit(1)
+
+        for _ in range(40):
+            if _daemon_running(socket_path):
+                break
+            time.sleep(0.05)
+        else:
+            console.print(
+                Panel(
+                    "daemon did not become ready",
+                    title="nue start failed",
+                    border_style="red",
+                )
+            )
+            raise SystemExit(1)
+
+        info = nuefs.daemon_info()
+        console.print(
+            Panel(
+                f"[bold]pid:[/] {info.pid}\n"
+                f"[bold]socket:[/] {info.socket}",
+                title="nuefsd started",
+                border_style="green",
+            )
+        )
+
+
+def _daemon_running(socket_path: pathlib.Path) -> bool:
+    import socket as sock
+
+    try:
+        s = sock.socket(sock.AF_UNIX, sock.SOCK_STREAM)
+        s.connect(str(socket_path))
+        s.close()
+        return True
+    except (FileNotFoundError, ConnectionRefusedError, OSError):
+        return False
+
+
+def _find_nuefsd() -> str:
+    import shutil
+
+    if found := shutil.which("nuefsd"):
+        return found
+
+    bin_dir = pathlib.Path(sys.executable).parent
+    candidate = bin_dir / "nuefsd"
+    if candidate.exists():
+        return str(candidate)
+
+    raise FileNotFoundError(
+        "nuefsd not found; install it or set NUEFSD_BIN environment variable"
+    )
+
+
 class Stop(NueBaseCommand):
     def run(self) -> None:
         cwd = os.getcwd()
@@ -222,7 +330,7 @@ class Stop(NueBaseCommand):
 
 
 def main() -> int:
-    cli(Annotated[Mount | Unmount | Status | Stop, Commands()]).run()
+    cli(Annotated[Mount | Unmount | Status | Start | Stop, Commands()]).run()
     return 0
 
 

@@ -92,6 +92,11 @@ def _daemon_info() -> DaemonInfo:
     Get daemon info.
     """
 
+def _default_socket_path() -> pathlib.Path:
+    r"""
+    Get the default socket path for the daemon.
+    """
+
 def _mount(root: builtins.str | os.PathLike | pathlib.Path, entries: typing.Sequence[ManifestEntry]) -> RawHandle:
     r"""
     Create a new mount.
