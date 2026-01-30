@@ -1,3 +1,4 @@
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,6 +23,9 @@ pub enum ServerError {
         socket: PathBuf,
         source: std::io::Error,
     },
+
+    #[error("another daemon is already running on {0}")]
+    AlreadyRunning(PathBuf),
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -115,9 +119,34 @@ impl NuefsService for NuefsServer {
         debug!(root = %root.display(), "RPC resolve");
         self.manager_call(|m| m.resolve(root)).await.ok().flatten()
     }
+
+    async fn shutdown(self, _: tarpc::context::Context) -> Result<(), String> {
+        info!("RPC shutdown");
+        let mount_ids: Vec<u64> = {
+            let manager = self.manager.lock().await;
+            manager.status().iter().map(|m| m.mount_id).collect()
+        };
+        for id in &mount_ids {
+            let mut manager = self.manager.lock().await;
+            if let Err(e) = manager.unmount(*id) {
+                warn!(mount_id = id, error = %e, "failed to unmount during shutdown");
+            }
+        }
+        info!(unmounted = mount_ids.len(), "shutdown complete, exiting");
+        let socket = self.socket_path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let _ = std::fs::remove_file(&socket);
+            std::process::exit(0);
+        });
+        Ok(())
+    }
 }
 
 pub async fn serve(socket_path: PathBuf) -> Result<(), ServerError> {
+    if StdUnixStream::connect(&socket_path).is_ok() {
+        return Err(ServerError::AlreadyRunning(socket_path));
+    }
     let _ = std::fs::remove_file(&socket_path);
 
     let started_at = std::time::SystemTime::now()

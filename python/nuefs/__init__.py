@@ -9,6 +9,7 @@ from nuefs.core import (
     default_socket_path,
     mount,
     open,
+    shutdown,
     status,
 )
 from nuefs.gitdir import ensure_external_gitdir
@@ -23,5 +24,6 @@ __all__ = [
     "mount",
     "open",
     "OwnerInfo",
+    "shutdown",
     "status",
 ]

@@ -106,6 +106,10 @@ impl Client {
     pub fn resolve(&self, root: PathBuf) -> Result<Option<u64>, ClientError> {
         self.call(|ctx| self.inner.resolve(ctx, root))
     }
+
+    pub fn shutdown(&self) -> Result<(), ClientError> {
+        self.call_daemon(|ctx| self.inner.shutdown(ctx))
+    }
 }
 
 fn ensure_daemon(socket_path: &PathBuf) -> Result<(), ClientError> {

@@ -257,6 +257,14 @@ fn _resolve(root: PathBuf) -> PyResult<Option<u64>> {
     client.resolve(root).map_err(to_pyerr)
 }
 
+/// Shutdown the daemon gracefully.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn _shutdown() -> PyResult<()> {
+    let client = Client::new().map_err(to_pyerr)?;
+    client.shutdown().map_err(to_pyerr)
+}
+
 /// Get the default socket path for the daemon.
 #[gen_stub_pyfunction]
 #[pyfunction]
@@ -281,6 +289,7 @@ fn _nuefs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_which, m)?)?;
     m.add_function(wrap_pyfunction!(_update, m)?)?;
     m.add_function(wrap_pyfunction!(_resolve, m)?)?;
+    m.add_function(wrap_pyfunction!(_shutdown, m)?)?;
     m.add_function(wrap_pyfunction!(_default_socket_path, m)?)?;
     Ok(())
 }

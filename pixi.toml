@@ -45,12 +45,7 @@ cargo run --bin stub_gen --features stub && \
 cp $CONDA_PREFIX/bin/nuefsd $(dirname $CONDA_PREFIX)/default/bin/
 """
 stop = """
-nue stop || true; \
-pkill -9 nuefsd || true; \
-test -n "$NUEFSD_SOCKET" && rm -f "$NUEFSD_SOCKET" || true; \
-test -n "$XDG_RUNTIME_DIR" && rm -f "$XDG_RUNTIME_DIR/nuefsd-$(id -u).sock" || true; \
-rm -f "/run/user/$(id -u)/nuefsd-$(id -u).sock" || true; \
-rm -f "/tmp/nuefsd-$(id -u).sock" || true
+nue stop 2>/dev/null || pkill -9 nuefsd || true
 """
 
 [environments]

@@ -107,6 +107,11 @@ def _resolve(root: builtins.str | os.PathLike | pathlib.Path) -> typing.Optional
     Resolve an existing mount by root. Returns mount_id if found.
     """
 
+def _shutdown() -> None:
+    r"""
+    Shutdown the daemon gracefully.
+    """
+
 def _status() -> builtins.list[RawHandle]:
     r"""
     List all active mounts.

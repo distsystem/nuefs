@@ -94,6 +94,11 @@ def daemon_info() -> DaemonInfo:
     return _ext._daemon_info()
 
 
+def shutdown() -> None:
+    """Shutdown the daemon gracefully."""
+    _ext._shutdown()
+
+
 def default_socket_path() -> pathlib.Path:
     """Get the default socket path for the daemon."""
     return pathlib.Path(_ext._default_socket_path())

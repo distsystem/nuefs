@@ -37,4 +37,5 @@ pub trait NuefsService {
     async fn daemon_info() -> DaemonInfo;
     async fn update(mount_id: u64, entries: Vec<ManifestEntry>) -> Result<(), String>;
     async fn resolve(root: PathBuf) -> Option<u64>;
+    async fn shutdown() -> Result<(), String>;
 }

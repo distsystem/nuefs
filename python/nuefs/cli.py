@@ -1,6 +1,5 @@
 import os
 import pathlib
-import signal
 import subprocess
 import sys
 import time
@@ -181,6 +180,17 @@ class Status(NueBaseCommand):
         console.print(Panel("\n".join(lines), title="nuefsd", border_style="dim"))
 
 
+class Stop(Command, app_name="nue"):
+    def run(self) -> None:
+        socket_path = nuefs.default_socket_path()
+        if not _daemon_running(socket_path):
+            console.print("[dim]daemon not running[/]")
+            return
+
+        nuefs.shutdown()
+        console.print("[green]daemon stopped[/]")
+
+
 class Start(NueBaseCommand):
     background: Annotated[bool, Flag("-b", "--background")] = False
 
@@ -285,63 +295,6 @@ def _find_nuefsd() -> str:
     raise FileNotFoundError(
         "nuefsd not found; install it or set NUEFSD_BIN environment variable"
     )
-
-
-class Stop(NueBaseCommand):
-    def run(self) -> None:
-        cwd = os.getcwd()
-        os.chdir("/")
-
-        mounts = nuefs.status()
-        failures: list[str] = []
-        for h in mounts:
-            try:
-                h.close()
-            except (OSError, RuntimeError) as e:
-                try:
-                    root = pathlib.Path(h.root)
-                    root_s = os.fspath(root)
-                    if cwd == root_s or cwd.startswith(f"{root_s}{os.sep}"):
-                        _lazy_unmount(root)
-                    else:
-                        failures.append(f"{h.root}: {e}")
-                except (OSError, RuntimeError) as e2:
-                    failures.append(f"{h.root}: {e} (lazy unmount failed: {e2})")
-
-        if failures:
-            console.print(
-                Panel(
-                    "\n".join(["failed to unmount:", *failures]),
-                    title="nue stop",
-                    border_style="red",
-                )
-            )
-            raise SystemExit(1)
-
-        info = nuefs.daemon_info()
-        pid = int(info.pid)
-
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-
-        for _ in range(40):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.05)
-        else:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-        try:
-            pathlib.Path(str(info.socket)).unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def main() -> int:
