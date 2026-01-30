@@ -13,7 +13,6 @@ from sheaves.cli import Command, cli
 from sheaves.console import console
 
 import nuefs
-from nuefs.core import ManifestEntry, compile_entries
 
 from . import gitdir as gitdir_mod
 from .manifest import Manifest
@@ -60,16 +59,13 @@ class Mount(NueBaseCommand):
                 self.root, gitdir_mod.default_gitdir_root()
             )
 
-        entries = compile_entries(self.root, self.mounts)
-
         if self.dry_run:
-            self._print_tree(entries)
+            self._print_tree()
             return
 
         os.chdir("/")
 
-        handle = nuefs.open(self.root)
-        handle.update(entries)
+        handle = nuefs.mount(self.root, self.compile_entries(self.root))
 
         if cwd == root or cwd.startswith(f"{root}{os.sep}"):
             console.print(
@@ -82,38 +78,28 @@ class Mount(NueBaseCommand):
                 )
             )
 
-    def _print_tree(self, entries: list[ManifestEntry]) -> None:
+    def _print_tree(self) -> None:
         """Print the virtual file tree without actually mounting."""
-        tree = Tree(f"[bold blue]{self.root}[/]")
-        nodes: dict[str, Tree] = {"": tree}
+        root = Tree(f"[bold blue]{self.root}[/]")
+        nodes: dict[str, Tree] = {"": root}
 
-        entries = sorted(entries, key=lambda e: e.virtual_path)
+        def _ensure_parent(path: str) -> Tree:
+            if path in nodes:
+                return nodes[path]
+            parent, _, name = path.rpartition("/")
+            node = _ensure_parent(parent).add(f"[bold cyan]{name}/[/]")
+            nodes[path] = node
+            return node
 
-        for entry in entries:
-            parts = pathlib.PurePosixPath(entry.virtual_path).parts
-            parent_path = ""
+        for entry in sorted(self.compile_entries(self.root), key=lambda e: e.virtual_path):
+            parent, _, name = entry.virtual_path.rpartition("/")
+            if entry.is_dir:
+                label = f"[bold cyan]{name}/[/] [dim]→ {entry.backend_path}[/]"
+            else:
+                label = f"{name} [dim]→ {entry.backend_path}[/]"
+            nodes[entry.virtual_path] = _ensure_parent(parent).add(label)
 
-            for i, part in enumerate(parts):
-                current_path = "/".join(parts[: i + 1])
-                if current_path in nodes:
-                    parent_path = current_path
-                    continue
-
-                parent_node = nodes[parent_path]
-                is_last = i == len(parts) - 1
-
-                if is_last:
-                    if entry.is_dir:
-                        label = f"[bold cyan]{part}/[/] [dim]→ {entry.backend_path}[/]"
-                    else:
-                        label = f"{part} [dim]→ {entry.backend_path}[/]"
-                else:
-                    label = f"[bold cyan]{part}/[/]"
-
-                nodes[current_path] = parent_node.add(label)
-                parent_path = current_path
-
-        console.print(tree)
+        console.print(root)
 
 
 class Unmount(Command, app_name="nue"):
