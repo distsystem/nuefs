@@ -4,7 +4,7 @@ from pathlib import Path
 
 from sheaves.typing import LocalPath
 
-from nuefs.manifest import CreatePolicy, Manifest, MountConfig, MountEntry
+from nuefs.manifest import Manifest, MountEntry
 
 
 def create_example_manifest() -> Manifest:
@@ -20,7 +20,6 @@ def create_example_manifest() -> Manifest:
             MountEntry(
                 source="~/local/lib",
                 target=LocalPath("vendor/lib"),
-                config=MountConfig(create_policy=CreatePolicy.FIRST),
             ),
         ],
     )

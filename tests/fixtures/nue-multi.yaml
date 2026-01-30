@@ -4,5 +4,3 @@ mounts:
   target: .
 - source: ./sources/override
   target: .
-  config:
-    create_policy: last

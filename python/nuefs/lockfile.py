@@ -14,26 +14,18 @@ import pydantic
 from sheaves.sheaf import Sheaf
 from sheaves.typing import Pathspec
 
+from nuefs.manifest import MountEntry
+
 import nuefs._nuefs as _ext
 
 # Directories to skip during scan (caches, build artifacts)
 SKIP_DIRS = {".git", ".pixi", "node_modules", "__pycache__", ".venv", "target"}
 
 
-class MountLayer(typing.NamedTuple):
-    """A mount layer with source, target, and filtering rules."""
-
-    source: pathlib.Path
-    target: str
-    exclude: Pathspec
-    include: Pathspec
-
-
 class LockMeta(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
 
     generated_at: int
-    nuefs_version: str | None = None
 
 
 class Lock(Sheaf):
@@ -52,9 +44,8 @@ class Lock(Sheaf):
     def compile(
         cls,
         root: pathlib.Path,
-        mounts: typing.Iterable[MountLayer | tuple[pathlib.Path, str]] = (),
+        mounts: typing.Iterable[MountEntry] = (),
         *,
-        nuefs_version: str | None = None,
         manifest_path: str = "nue.yaml",
     ) -> "Lock":
         root = root.expanduser().resolve()
@@ -62,13 +53,12 @@ class Lock(Sheaf):
         entries: dict[str, _ext.ManifestEntry] = {}
 
         for mount in mounts:
-            if isinstance(mount, MountLayer):
-                cls._apply_layer(
-                    entries, mount.source, mount.target, mount.exclude, mount.include
-                )
-            else:
-                source, target = mount
-                cls._apply_layer(entries, source, target, Pathspec(), Pathspec())
+            source = pathlib.Path(str(mount.source)).expanduser()
+            if not source.is_absolute():
+                source = (root / source).resolve()
+            cls._apply_layer(
+                entries, source, str(mount.target), mount.exclude, mount.include
+            )
 
         manifest_sha256 = None
         manifest_file = root / manifest_path
@@ -76,10 +66,7 @@ class Lock(Sheaf):
             manifest_sha256 = hashlib.sha256(manifest_file.read_bytes()).hexdigest()
 
         return cls(
-            meta=LockMeta(
-                generated_at=int(time.time()),
-                nuefs_version=nuefs_version,
-            ),
+            meta=LockMeta(generated_at=int(time.time())),
             entries=list(entries.values()),
             manifest_path=manifest_path,
             manifest_sha256=manifest_sha256,
