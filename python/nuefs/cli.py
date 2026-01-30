@@ -13,7 +13,7 @@ from sheaves.cli import Command, cli
 from sheaves.console import console
 
 import nuefs
-from nuefs.lockfile import Lock
+from nuefs.core import ManifestEntry, compile_entries
 
 from . import gitdir as gitdir_mod
 from .manifest import Manifest
@@ -60,18 +60,16 @@ class Mount(NueBaseCommand):
                 self.root, gitdir_mod.default_gitdir_root()
             )
 
-        lock = Lock.compile(self.root, self.mounts)
+        entries = compile_entries(self.root, self.mounts)
 
         if self.dry_run:
-            self._print_tree(lock)
+            self._print_tree(entries)
             return
-
-        lock.save(self.root / "nue.lock")
 
         os.chdir("/")
 
         handle = nuefs.open(self.root)
-        handle.update(lock.entries)
+        handle.update(entries)
 
         if cwd == root or cwd.startswith(f"{root}{os.sep}"):
             console.print(
@@ -84,12 +82,12 @@ class Mount(NueBaseCommand):
                 )
             )
 
-    def _print_tree(self, lock: Lock) -> None:
+    def _print_tree(self, entries: list[ManifestEntry]) -> None:
         """Print the virtual file tree without actually mounting."""
         tree = Tree(f"[bold blue]{self.root}[/]")
         nodes: dict[str, Tree] = {"": tree}
 
-        entries = sorted(lock.entries, key=lambda e: e.virtual_path)
+        entries = sorted(entries, key=lambda e: e.virtual_path)
 
         for entry in entries:
             parts = pathlib.PurePosixPath(entry.virtual_path).parts

@@ -6,12 +6,23 @@ import pathlib
 import typing
 
 import nuefs._nuefs as _ext
-
-from nuefs.lockfile import Lock
+from nuefs.manifest import MountEntry
 
 ManifestEntry = _ext.ManifestEntry
 OwnerInfo = _ext.OwnerInfo
 DaemonInfo = _ext.DaemonInfo
+
+
+def compile_entries(
+    root: pathlib.Path,
+    mounts: typing.Iterable[MountEntry] = (),
+) -> list[ManifestEntry]:
+    """Compile mount entries into a flat list of ManifestEntry."""
+    root = root.expanduser().resolve()
+    entries: dict[str, ManifestEntry] = {}
+    for mount in mounts:
+        entries.update(mount.resolve(root))
+    return list(entries.values())
 
 
 class Handle:
@@ -61,9 +72,9 @@ def open(root: str | os.PathLike[str] | pathlib.Path) -> Handle:
     if mount_id is not None:
         return Handle(str(root_path), mount_id)
 
-    lock = Lock.compile(root_path, ())
+    entries = compile_entries(root_path)
 
-    raw = _ext._mount(root_path, lock.entries)
+    raw = _ext._mount(root_path, entries)
     return Handle(str(raw.root), raw.mount_id)
 
 
