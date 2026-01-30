@@ -16,35 +16,6 @@ DEFAULT_EXCLUDE = Pathspec(
 )
 
 
-def _collapse_single_child_dirs(
-    dir_path: pathlib.Path,
-    rel_name: str,
-    is_excluded: collections.abc.Callable[[str], bool],
-) -> tuple[pathlib.Path, str]:
-    """Collapse single-child directory chains into minimal cover prefix.
-
-    Walks down directories that have exactly one non-excluded subdirectory
-    (and no non-excluded files), accumulating the relative path.
-    """
-    while True:
-        dirs: list[pathlib.Path] = []
-        has_files = False
-        for item in dir_path.iterdir():
-            is_dir = item.is_dir() and not item.is_symlink()
-            if is_excluded(item.name, is_dir=is_dir):
-                continue
-            if is_dir:
-                dirs.append(item)
-            else:
-                has_files = True
-                break  # any file → stop collapsing
-        if has_files or len(dirs) != 1:
-            break
-        dir_path = dirs[0]
-        rel_name = f"{rel_name}/{dirs[0].name}"
-    return dir_path, rel_name
-
-
 class MountEntry(pydantic.BaseModel):
     """A single mount entry in the manifest."""
 
@@ -57,6 +28,48 @@ class MountEntry(pydantic.BaseModel):
 
     def resolve(self, root: pathlib.Path) -> dict[str, _ext.ManifestEntry]:
         """Resolve this mount entry into ManifestEntry mappings."""
+        return {
+            vpath: _ext.ManifestEntry(
+                virtual_path=vpath,
+                backend_path=path,
+                is_dir=is_dir,
+            )
+            for vpath, path, is_dir in self._iter_entries(root)
+        }
+
+    def _is_excluded(self, name: str, *, is_dir: bool = False) -> bool:
+        path = f"{name}/" if is_dir else name
+        return self.exclude.match(path) and not self.include.match(path)
+
+    def _collapse_chain(
+        self,
+        dir_path: pathlib.Path,
+        rel_name: str,
+    ) -> tuple[pathlib.Path, str]:
+        """Collapse single-child directory chains into minimal cover prefix."""
+        while True:
+            dirs: list[pathlib.Path] = []
+            has_files = False
+            for item in dir_path.iterdir():
+                is_dir = item.is_dir() and not item.is_symlink()
+                if self._is_excluded(item.name, is_dir=is_dir):
+                    continue
+                if is_dir:
+                    dirs.append(item)
+                else:
+                    has_files = True
+                    break
+            if has_files or len(dirs) != 1:
+                break
+            dir_path = dirs[0]
+            rel_name = f"{rel_name}/{dirs[0].name}"
+        return dir_path, rel_name
+
+    def _resolve_source(
+        self,
+        root: pathlib.Path,
+    ) -> tuple[pathlib.Path, str, bool]:
+        """Return (resolved_source, prefix, expand_contents)."""
         raw = self.source.strip()
         expand_contents = raw.endswith("/") or raw in (".", "./")
 
@@ -66,7 +79,6 @@ class MountEntry(pydantic.BaseModel):
         else:
             source = source.resolve()
 
-        # rsync-style dest: explicit > auto-derived
         if self.dest:
             prefix = self.dest.strip().strip("/")
         elif expand_contents or source.is_file():
@@ -74,60 +86,41 @@ class MountEntry(pydantic.BaseModel):
         else:
             prefix = source.name
 
-        exclude_spec = self.exclude
-        include_spec = self.include
+        return source, prefix, expand_contents
 
-        def is_excluded(rel_path: str, *, is_dir: bool = False) -> bool:
-            path = f"{rel_path}/" if is_dir else rel_path
-            return exclude_spec.match(path) and not include_spec.match(path)
-
-        entries: dict[str, _ext.ManifestEntry] = {}
+    def _iter_entries(
+        self,
+        root: pathlib.Path,
+    ) -> collections.abc.Iterator[tuple[str, pathlib.Path, bool]]:
+        """Yield (vpath, backend_path, is_dir) for all resolved entries."""
+        source, prefix, expand_contents = self._resolve_source(root)
 
         if not source.exists():
-            return entries
+            return
 
-        # Single file: dest acts as full virtual path (rename)
+        # Single file
         if source.is_file():
             vpath = prefix if prefix else source.name
-            if not is_excluded(vpath):
-                entries[vpath] = _ext.ManifestEntry(
-                    virtual_path=vpath,
-                    backend_path=source,
-                    is_dir=False,
-                )
-            return entries
+            if not self._is_excluded(vpath):
+                yield vpath, source, False
+            return
 
-        # Directory without trailing slash: register as single entry
+        # Directory without trailing slash: single entry
         if not expand_contents:
-            vpath = prefix  # always non-empty (auto-derived = basename)
-            entries[vpath] = _ext.ManifestEntry(
-                virtual_path=vpath,
-                backend_path=source,
-                is_dir=True,
-            )
-            return entries
+            yield prefix, source, True
+            return
 
-        # Trailing slash: expand contents into dest prefix
-        items = [
-            (item.name, item, item.is_dir() and not item.is_symlink())
-            for item in source.iterdir()
-        ]
-
-        for name, path, is_dir in items:
-            if is_excluded(name, is_dir=is_dir):
+        # Trailing slash: expand contents
+        for item in source.iterdir():
+            is_dir = item.is_dir() and not item.is_symlink()
+            name = item.name
+            if self._is_excluded(name, is_dir=is_dir):
                 continue
+            path = item
             if is_dir:
-                path, name = _collapse_single_child_dirs(
-                    path, name, is_excluded
-                )
+                path, name = self._collapse_chain(path, name)
             vpath = f"{prefix}/{name}" if prefix else name
-            entries[vpath] = _ext.ManifestEntry(
-                virtual_path=vpath,
-                backend_path=path,
-                is_dir=is_dir,
-            )
-
-        return entries
+            yield vpath, path, is_dir
 
 
 class Manifest(Sheaf, app_name="nue"):
