@@ -42,6 +42,25 @@ NueFS creates a **live template overlay**: template files appear directly in you
 
 Unlike cookiecutter/copier, template files are not copied — they're mounted. Update the template once, all projects see the change.
 
+
+## Comparison with Other Approaches
+
+
+| | Dir merge | Relocation | Write-through | Transparent | Live sync |
+|---|---|---|---|---|---|
+| **overlayfs** | ✓ | ✗ | Upper only | ✓ | ✓ |
+| **unionfs** | ✓ | ✗ | Limited | ✓ | ✓ |
+| **mergerfs** | Pool only | ✗ | ✓ | ✓ | ✓ |
+| **git submodule** | ✗ (subdirs only) | Subdir only | ✓ | ✓ | ✗ (manual) |
+| **git subtree** | ✗ (subdirs only) | Subdir only | ✗ (copy) | ✓ | ✗ (manual) |
+| **vcsh** | ✓ | ✗ (same layout) | ✓ | ✓ | ✗ (manual) |
+| **jj monorepo** | ✗ | ✗ | ✓ | ✓ | ✗ |
+| **GNU Stow** | ✓ | ✓ | ✓ | ✗ (symlink) | ✗ (re-stow) |
+| **chezmoi** | ✓ | ✓ | ✗ (copy) | ✗ (symlink/copy) | ✗ (apply) |
+| **Nix home-manager** | ✓ | ✓ | ✗ (read-only) | ✗ (symlink→store) | ✗ (switch) |
+| **NueFS** | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+
 ## Mount Types
 
 NueFS supports both directory and single-file mounts:
