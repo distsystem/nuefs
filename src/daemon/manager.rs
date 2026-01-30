@@ -223,26 +223,10 @@ impl Manager {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Owner {
-    Real,
-    Layer,
-}
-
-impl Owner {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Real => "real",
-            Self::Layer => "layer",
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 struct Entry {
     display_backend: PathBuf,
     io_backend: PathBuf,
-    owner: Owner,
     is_dir: bool,
 }
 
@@ -306,14 +290,14 @@ impl Manifest {
         let real_procfd_root = procfd_root(real_root_fd);
         let mut map = HashMap::new();
         for e in entries {
-            let (owner, io_backend) = if e.backend_path.starts_with(&display_root) {
+            let io_backend = if e.backend_path.starts_with(&display_root) {
                 let rel = e
                     .backend_path
                     .strip_prefix(&display_root)
                     .unwrap_or_else(|_| e.backend_path.as_path());
-                (Owner::Real, real_procfd_root.join(rel))
+                real_procfd_root.join(rel)
             } else {
-                (Owner::Layer, e.backend_path.clone())
+                e.backend_path.clone()
             };
 
             map.insert(
@@ -321,7 +305,6 @@ impl Manifest {
                 Entry {
                     display_backend: e.backend_path,
                     io_backend,
-                    owner,
                     is_dir: e.is_dir,
                 },
             );
@@ -334,12 +317,22 @@ impl Manifest {
         }
     }
 
+    fn owner_label(&self, backend_path: &PathBuf) -> String {
+        if backend_path.starts_with(&self.display_root) {
+            "self".to_string()
+        } else {
+            backend_path
+                .to_string_lossy()
+                .to_string()
+        }
+    }
+
     pub(crate) fn which(&self, path: &str) -> Option<OwnerInfoWire> {
         let path = path.trim_start_matches('/');
 
         if let Some(entry) = self.entries.get(path) {
             return Some(OwnerInfoWire {
-                owner: entry.owner.as_str().to_string(),
+                owner: self.owner_label(&entry.display_backend),
                 backend_path: entry.display_backend.clone(),
             });
         }
@@ -347,16 +340,12 @@ impl Manifest {
         if let Some((entry, suffix)) = self.find_dir_prefix(path) {
             let backend_path = join_path(&entry.display_backend, suffix);
             return Some(OwnerInfoWire {
-                owner: entry.owner.as_str().to_string(),
+                owner: self.owner_label(&entry.display_backend),
                 backend_path,
             });
         }
 
-        // Fallback: assume real path (caller will verify existence)
-        Some(OwnerInfoWire {
-            owner: "real".to_string(),
-            backend_path: self.display_root.join(path),
-        })
+        None
     }
 
     pub(crate) fn resolve_paths(&self, path: &str) -> ResolvedPaths {
@@ -376,6 +365,9 @@ impl Manifest {
             };
         }
 
+        // With a root entry (""), this should be unreachable.
+        // Defensive fallback to display_root if no entry matches.
+        warn!(path, "no matching entry found, falling back to display_root");
         ResolvedPaths {
             display_path: self.display_root.join(path),
             io_path: self.real_procfd_root.join(path),
@@ -401,6 +393,7 @@ impl Manifest {
             };
         }
 
+        warn!(parent_path, "no matching entry found, falling back to display_root");
         DirTarget {
             display_dir: self.display_root.join(parent_path),
             io_dir: self.real_procfd_root.join(parent_path),
@@ -432,10 +425,18 @@ impl Manifest {
 
     fn find_dir_prefix<'a>(&'a self, path: &'a str) -> Option<(&'a Entry, &'a str)> {
         let mut best: Option<(&Entry, &str)> = None;
-        let mut best_len = 0usize;
+        let mut best_len: Option<usize> = None;
 
         for (entry_path, entry) in &self.entries {
             if !entry.is_dir {
+                continue;
+            }
+
+            if entry_path.is_empty() {
+                // Root entry "" matches everything
+                if best_len.is_none() {
+                    best = Some((entry, path));
+                }
                 continue;
             }
 
@@ -447,11 +448,11 @@ impl Manifest {
                 continue;
             }
 
-            if entry_path.len() <= best_len {
+            if best_len.is_some_and(|bl| entry_path.len() <= bl) {
                 continue;
             }
 
-            best_len = entry_path.len();
+            best_len = Some(entry_path.len());
             best = Some((entry, rest.trim_start_matches('/')));
         }
 
@@ -466,20 +467,13 @@ impl Manifest {
     ) {
         let path = path.trim_start_matches('/');
 
-        let owner = if backend_path.starts_with(&self.display_root) {
-            Owner::Real
+        let io_backend = if backend_path.starts_with(&self.display_root) {
+            let rel = backend_path
+                .strip_prefix(&self.display_root)
+                .unwrap_or_else(|_| backend_path.as_path());
+            self.real_procfd_root.join(rel)
         } else {
-            Owner::Layer
-        };
-
-        let io_backend = match owner {
-            Owner::Real => {
-                let rel = backend_path
-                    .strip_prefix(&self.display_root)
-                    .unwrap_or_else(|_| backend_path.as_path());
-                self.real_procfd_root.join(rel)
-            }
-            Owner::Layer => backend_path.clone(),
+            backend_path.clone()
         };
 
         self.entries.insert(
@@ -487,7 +481,6 @@ impl Manifest {
             Entry {
                 display_backend: backend_path,
                 io_backend,
-                owner,
                 is_dir,
             },
         );
@@ -597,6 +590,11 @@ mod tests {
 
         let entries = vec![
             ManifestEntry {
+                virtual_path: "".to_string(),
+                backend_path: root.clone(),
+                is_dir: true,
+            },
+            ManifestEntry {
                 virtual_path: "real.txt".to_string(),
                 backend_path: root.join("real.txt"),
                 is_dir: false,
@@ -635,11 +633,18 @@ mod tests {
         let root_fd = File::open(&root).unwrap();
         let raw_fd = root_fd.as_raw_fd();
 
-        let entries = vec![ManifestEntry {
-            virtual_path: "vendor".to_string(),
-            backend_path: PathBuf::from("/opt/vendor"),
-            is_dir: true,
-        }];
+        let entries = vec![
+            ManifestEntry {
+                virtual_path: "".to_string(),
+                backend_path: root.clone(),
+                is_dir: true,
+            },
+            ManifestEntry {
+                virtual_path: "vendor".to_string(),
+                backend_path: PathBuf::from("/opt/vendor"),
+                is_dir: true,
+            },
+        ];
 
         let manifest = Manifest::from_entries(root.clone(), raw_fd, entries);
 

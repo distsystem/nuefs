@@ -1,5 +1,7 @@
 apiVersion: nue/v1
 mounts:
+- source: .
+  target: .
 - source: ../sheaves
   target: sheaves
   exclude:

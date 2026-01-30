@@ -61,21 +61,6 @@ class Lock(Sheaf):
 
         entries: dict[str, _ext.ManifestEntry] = {}
 
-        # Minimal cover: only register top-level entries, not recursive.
-        # FUSE layer will use openat to read subdirectory contents dynamically.
-        if root.exists():
-            for item in root.iterdir():
-                name = item.name
-                try:
-                    is_dir = item.is_dir() and not item.is_symlink()
-                except (PermissionError, OSError):
-                    continue
-                entries[name] = _ext.ManifestEntry(
-                    virtual_path=name,
-                    backend_path=item.resolve() if not item.is_symlink() else item,
-                    is_dir=is_dir,
-                )
-
         for mount in mounts:
             if isinstance(mount, MountLayer):
                 cls._apply_layer(
