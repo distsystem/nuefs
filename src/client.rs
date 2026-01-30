@@ -6,6 +6,7 @@ use tarpc::client;
 use tarpc::serde_transport;
 use tarpc::tokio_serde::formats::Bincode;
 use thiserror::Error;
+use tracing::info;
 
 use crate::types::{DaemonInfo, ManifestEntry, MountStatus, NuefsServiceClient, OwnerInfoWire};
 
@@ -117,11 +118,69 @@ fn ensure_daemon(socket_path: &PathBuf) -> Result<(), ClientError> {
         return Ok(());
     }
 
+    let bin = find_nuefsd().ok_or_else(|| ClientError::Connect {
+        socket: socket_path.clone(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nuefsd not found; install it or set NUEFSD_BIN",
+        ),
+    })?;
+
+    info!(bin = %bin.display(), "auto-starting nuefsd");
+
+    let child = std::process::Command::new(&bin)
+        .args(["--socket", &socket_path.to_string_lossy()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .current_dir("/")
+        .spawn()
+        .map_err(|e| ClientError::Connect {
+            socket: socket_path.clone(),
+            source: e,
+        })?;
+
+    // Detach child so it outlives this process.
+    std::mem::forget(child);
+
+    for _ in 0..40 {
+        if StdUnixStream::connect(socket_path).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
     Err(ClientError::Connect {
         socket: socket_path.clone(),
         source: std::io::Error::new(
-            std::io::ErrorKind::NotConnected,
-            "daemon not running; start it with `nue start`",
+            std::io::ErrorKind::TimedOut,
+            "nuefsd started but did not become ready",
         ),
     })
+}
+
+fn find_nuefsd() -> Option<PathBuf> {
+    if let Some(bin) = std::env::var_os("NUEFSD_BIN") {
+        let p = PathBuf::from(bin);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    if let Some(sibling) = std::env::current_exe()
+        .ok()
+        .map(|e| e.with_file_name("nuefsd"))
+        .filter(|p| p.exists())
+    {
+        return Some(sibling);
+    }
+
+    which("nuefsd")
+}
+
+fn which(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(name))
+        .find(|p| p.is_file())
 }
