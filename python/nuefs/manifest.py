@@ -129,9 +129,16 @@ class Manifest(Sheaf, app_name="nue"):
     apiVersion: Literal["nue/v1"] = "nue/v1"
     mounts: list[MountEntry] = pydantic.Field(default_factory=list)
 
-    def compile_entries(self, root: pathlib.Path) -> list[_ext.ManifestEntry]:
-        root = root.expanduser().resolve()
-        entries: dict[str, _ext.ManifestEntry] = {}
+    @property
+    def root(self) -> pathlib.Path:
+        return self.sheaf_source.parent
+
+    def resolve_mounts(
+        self,
+    ) -> collections.abc.Iterator[tuple[MountEntry, dict[str, _ext.ManifestEntry]]]:
+        root = self.root.expanduser().resolve()
         for mount in self.mounts:
-            entries.update(mount.resolve(root))
-        return list(entries.values())
+            resolved = mount.resolve(root)
+            if resolved:
+                yield mount, resolved
+

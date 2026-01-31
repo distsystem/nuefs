@@ -5,10 +5,9 @@ import sys
 import time
 from typing import Annotated
 
-import pydantic
 from rich.panel import Panel
 from rich.tree import Tree
-from sheaves.annotations import Commands, Flag, Option, Readonly
+from sheaves.annotations import Commands, Flag, Option
 from sheaves.cli import Command, cli
 from sheaves.console import console
 
@@ -38,10 +37,7 @@ def _lazy_unmount(root: pathlib.Path) -> None:
 
 
 class NueBaseCommand(Manifest, Command, app_name="nue"):
-    @pydantic.computed_field
-    @property
-    def root(self) -> Annotated[pathlib.Path, Readonly]:
-        return self.sheaf_source.parent
+    pass
 
 
 class Mount(NueBaseCommand):
@@ -50,56 +46,56 @@ class Mount(NueBaseCommand):
     ] = False
 
     def run(self) -> None:
-        cwd = os.getcwd()
-        root = os.fspath(self.root)
+        root = self.root
 
-        git_path = self.root / ".git"
+        git_path = root / ".git"
         if git_path.exists() and not self.dry_run:
-            gitdir_mod.ensure_external_gitdir(
-                self.root, gitdir_mod.default_gitdir_root()
-            )
+            gitdir_mod.ensure_external_gitdir(root, gitdir_mod.default_gitdir_root())
 
         if self.dry_run:
             self._print_tree()
             return
 
-        os.chdir("/")
+        entries: dict[str, nuefs._nuefs.ManifestEntry] = {}
+        for _, resolved in self.resolve_mounts():
+            entries.update(resolved)
+        handle = nuefs.mount(root, list(entries.values()))
 
-        handle = nuefs.mount(self.root, self.compile_entries(self.root))
-
-        if cwd == root or cwd.startswith(f"{root}{os.sep}"):
-            console.print(
-                Panel(
-                    "Mount created, but your current shell is already inside the directory.\n"
-                    "Re-enter it to see the mounted view:\n\n"
-                    f"  cd .. && cd {root}\n",
-                    title="nue mount",
-                    border_style="yellow",
-                )
+        console.print(
+            Panel(
+                "Mount created, but your current shell is already inside the directory.\n"
+                "Re-enter it to see the mounted view:\n\n"
+                f"  cd .. && cd -\n",
+                title="nue mount",
+                border_style="yellow",
             )
+        )
 
     def _print_tree(self) -> None:
-        """Print the virtual file tree without actually mounting."""
-        root = Tree(f"[bold blue]{self.root}[/]")
-        nodes: dict[str, Tree] = {"": root}
+        """Print the virtual file tree grouped by mount source."""
+        tree = Tree(f"[bold blue]{self.root}[/]")
 
-        def _ensure_parent(path: str) -> Tree:
-            if path in nodes:
-                return nodes[path]
-            parent, _, name = path.rpartition("/")
-            node = _ensure_parent(parent).add(f"[bold cyan]{name}/[/]")
-            nodes[path] = node
-            return node
+        for mount, resolved in self.resolve_mounts():
+            branch = tree.add(f"[bold yellow]{mount.source}[/]")
+            nodes: dict[str, Tree] = {"": branch}
 
-        for entry in sorted(self.compile_entries(self.root), key=lambda e: e.virtual_path):
-            parent, _, name = entry.virtual_path.rpartition("/")
-            if entry.is_dir:
-                label = f"[bold cyan]{name}/[/] [dim]→ {entry.backend_path}[/]"
-            else:
-                label = f"{name} [dim]→ {entry.backend_path}[/]"
-            nodes[entry.virtual_path] = _ensure_parent(parent).add(label)
+            def _ensure_parent(path: str) -> Tree:
+                if path in nodes:
+                    return nodes[path]
+                parent, _, name = path.rpartition("/")
+                node = _ensure_parent(parent).add(f"[bold cyan]{name}/[/]")
+                nodes[path] = node
+                return node
 
-        console.print(root)
+            for entry in sorted(resolved.values(), key=lambda e: e.virtual_path):
+                parent, _, name = entry.virtual_path.rpartition("/")
+                if entry.is_dir:
+                    label = f"[bold cyan]{name}/[/] [dim]→ {entry.backend_path}[/]"
+                else:
+                    label = f"{name} [dim]→ {entry.backend_path}[/]"
+                nodes[entry.virtual_path] = _ensure_parent(parent).add(label)
+
+        console.print(tree)
 
 
 class Unmount(Command, app_name="nue"):
@@ -125,10 +121,6 @@ class Unmount(Command, app_name="nue"):
             if os.path.normpath(h.root) == root:
                 h.close()
                 return
-
-
-class Umount(Unmount):
-    pass
 
 
 class Status(NueBaseCommand):
@@ -162,30 +154,6 @@ class Stop(Command, app_name="nue"):
         console.print("[green]daemon stopped[/]")
 
 
-class Start(Command, app_name="nue"):
-    """Start the daemon in the foreground (for debugging)."""
-
-    def run(self) -> None:
-        socket_path = nuefs.default_socket_path()
-
-        if _daemon_running(socket_path):
-            info = nuefs.daemon_info()
-            console.print(
-                Panel(
-                    f"[bold]pid:[/] {info.pid}\n[bold]socket:[/] {info.socket}",
-                    title="nuefsd already running",
-                    border_style="yellow",
-                )
-            )
-            return
-
-        daemon_bin = os.environ.get("NUEFSD_BIN") or _find_nuefsd()
-        cmd = [daemon_bin, "--socket", str(socket_path), "--log", "-"]
-        console.print(f"[dim]Starting: {' '.join(cmd)}[/]")
-        os.chdir("/")
-        os.execvp(cmd[0], cmd)
-
-
 def _daemon_running(socket_path: pathlib.Path) -> bool:
     import socket as sock
 
@@ -198,24 +166,8 @@ def _daemon_running(socket_path: pathlib.Path) -> bool:
         return False
 
 
-def _find_nuefsd() -> str:
-    import shutil
-
-    if found := shutil.which("nuefsd"):
-        return found
-
-    bin_dir = pathlib.Path(sys.executable).parent
-    candidate = bin_dir / "nuefsd"
-    if candidate.exists():
-        return str(candidate)
-
-    raise FileNotFoundError(
-        "nuefsd not found; install it or set NUEFSD_BIN environment variable"
-    )
-
-
 def main() -> int:
-    cli(Annotated[Mount | Unmount | Umount | Status | Start | Stop, Commands()]).run()
+    cli(Annotated[Mount | Unmount | Status | Stop, Commands()]).run()
     return 0
 
 
