@@ -14,7 +14,7 @@ from sheaves.console import console
 import nuefs
 
 from . import gitdir as gitdir_mod
-from .manifest import Manifest
+from .manifest import Manifest, MountEntry
 
 
 def _lazy_unmount(root: pathlib.Path) -> None:
@@ -48,54 +48,69 @@ class Mount(NueBaseCommand):
     def run(self) -> None:
         root = self.root
 
-        git_path = root / ".git"
-        if git_path.exists() and not self.dry_run:
-            gitdir_mod.ensure_external_gitdir(root, gitdir_mod.default_gitdir_root())
+        if not self.dry_run:
+            git_path = root / ".git"
+            if git_path.exists():
+                gitdir_mod.ensure_external_gitdir(root, gitdir_mod.default_gitdir_root())
+
+        sources = list(self.resolve_mounts())
+        entries: dict[str, nuefs._nuefs.ManifestEntry] = {}
+        for _, resolved in sources:
+            entries.update(resolved)
+
+        self._print_tree(sources, entries)
 
         if self.dry_run:
-            self._print_tree()
             return
 
-        entries: dict[str, nuefs._nuefs.ManifestEntry] = {}
-        for _, resolved in self.resolve_mounts():
-            entries.update(resolved)
-        handle = nuefs.mount(root, list(entries.values()))
-
+        nuefs.mount(root, list(entries.values()))
         console.print(
             Panel(
                 "Mount created, but your current shell is already inside the directory.\n"
                 "Re-enter it to see the mounted view:\n\n"
-                f"  cd .. && cd -\n",
+                "  cd .. && cd -\n",
                 title="nue mount",
                 border_style="yellow",
             )
         )
 
-    def _print_tree(self) -> None:
-        """Print the virtual file tree grouped by mount source."""
-        tree = Tree(f"[bold blue]{self.root}[/]")
+    def _print_tree(
+        self,
+        sources: list[tuple[MountEntry, dict[str, nuefs._nuefs.ManifestEntry]]],
+        entries: dict[str, nuefs._nuefs.ManifestEntry],
+    ) -> None:
+        source_tree = Tree(f"[bold blue]{self.root}[/] [dim](sources)[/]")
+        for mount, resolved in sources:
+            branch = source_tree.add(f"[bold yellow]{mount.source}[/]")
+            self._render_entries(branch, resolved)
+        console.print(source_tree)
+        console.print()
 
-        for mount, resolved in self.resolve_mounts():
-            branch = tree.add(f"[bold yellow]{mount.source}[/]")
-            nodes: dict[str, Tree] = {"": branch}
+        merged_tree = Tree(f"[bold blue]{self.root}[/] [dim](merged)[/]")
+        self._render_entries(merged_tree, entries)
+        console.print(merged_tree)
 
-            def _ensure_parent(path: str) -> Tree:
-                if path in nodes:
-                    return nodes[path]
-                parent, _, name = path.rpartition("/")
-                node = _ensure_parent(parent).add(f"[bold cyan]{name}/[/]")
-                nodes[path] = node
-                return node
+    @staticmethod
+    def _render_entries(
+        root_node: Tree, entries: dict[str, nuefs._nuefs.ManifestEntry]
+    ) -> None:
+        nodes: dict[str, Tree] = {"": root_node}
 
-            for entry in sorted(resolved.values(), key=lambda e: e.virtual_path):
-                parent, _, name = entry.virtual_path.rpartition("/")
-                if entry.is_dir:
-                    label = f"[bold cyan]{name}/[/] [dim]→ {entry.backend_path}[/]"
-                else:
-                    label = f"{name} [dim]→ {entry.backend_path}[/]"
-                nodes[entry.virtual_path] = _ensure_parent(parent).add(label)
+        def _ensure_parent(path: str) -> Tree:
+            if path in nodes:
+                return nodes[path]
+            parent, _, name = path.rpartition("/")
+            node = _ensure_parent(parent).add(f"[bold cyan]{name}/[/]")
+            nodes[path] = node
+            return node
 
-        console.print(tree)
+        for entry in sorted(entries.values(), key=lambda e: e.virtual_path):
+            parent, _, name = entry.virtual_path.rpartition("/")
+            if entry.is_dir:
+                label = f"[bold cyan]{name}/[/] [dim]→ {entry.backend_path}[/]"
+            else:
+                label = f"{name} [dim]→ {entry.backend_path}[/]"
+            nodes[entry.virtual_path] = _ensure_parent(parent).add(label)
 
 
 class Unmount(Command, app_name="nue"):
