@@ -13,7 +13,6 @@ from sheaves.console import console
 import nuefs
 
 from . import gitdir as gitdir_mod
-from .core import mount
 from .manifest import Manifest, print_tree
 
 
@@ -65,16 +64,17 @@ class Mount(NueBaseCommand):
         if self.dry_run:
             return
 
-        mount(root, list(entries.values()))
-        console.print(
-            Panel(
-                "Mount created, but your current shell is already inside the directory.\n"
-                "Re-enter it to see the mounted view:\n\n"
-                "  cd .. && cd -\n",
-                title="nue mount",
-                border_style="yellow",
+        with nuefs.open(root) as h:
+            h.update(list(entries.values()))
+            console.print(
+                Panel(
+                    "Mount created, but your current shell is already inside the directory.\n"
+                    "Re-enter it to see the mounted view:\n\n"
+                    "  cd .. && cd -\n",
+                    title="nue mount",
+                    border_style="yellow",
+                )
             )
-        )
 
 
 class Unmount(Command, app_name="nue"):
@@ -98,7 +98,7 @@ class Unmount(Command, app_name="nue"):
 
         for h in nuefs.status():
             if os.path.normpath(h.root) == root:
-                h.close()
+                h.unmount()
                 return
 
 

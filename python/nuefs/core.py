@@ -34,9 +34,12 @@ class Handle:
         """Query which backend owns a path."""
         return _ext._which(self._mount_id, path)
 
-    def close(self) -> None:
-        """Close the mount."""
+    def unmount(self) -> None:
+        """Unmount the filesystem."""
         _ext._unmount(self._mount_id)
+
+    def close(self) -> None:
+        """Release the client handle (mount stays alive in daemon)."""
 
     def __enter__(self) -> typing.Self:
         return self
@@ -60,23 +63,6 @@ def open(root: str | os.PathLike[str] | pathlib.Path) -> Handle:
         return Handle(str(root_path), mount_id)
 
     raw = _ext._mount(root_path, [])
-    return Handle(str(raw.root), raw.mount_id)
-
-
-def mount(
-    root: str | os.PathLike[str] | pathlib.Path,
-    entries: collections.abc.Sequence[ManifestEntry],
-) -> Handle:
-    """Create a mount with entries, or update if it exists."""
-    root_path = pathlib.Path(root).expanduser().resolve()
-
-    mount_id = _ext._resolve(root_path)
-    if mount_id is not None:
-        handle = Handle(str(root_path), mount_id)
-        handle.update(entries)
-        return handle
-
-    raw = _ext._mount(root_path, list(entries))
     return Handle(str(raw.root), raw.mount_id)
 
 
