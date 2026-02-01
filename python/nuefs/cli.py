@@ -6,7 +6,6 @@ import time
 from typing import Annotated
 
 from rich.panel import Panel
-from rich.tree import Tree
 from sheaves.annotations import Commands, Flag, Option
 from sheaves.cli import Command, cli
 from sheaves.console import console
@@ -14,7 +13,8 @@ from sheaves.console import console
 import nuefs
 
 from . import gitdir as gitdir_mod
-from .manifest import Manifest, MountEntry
+from .core import mount
+from .manifest import Manifest, print_tree
 
 
 def _lazy_unmount(root: pathlib.Path) -> None:
@@ -51,19 +51,21 @@ class Mount(NueBaseCommand):
         if not self.dry_run:
             git_path = root / ".git"
             if git_path.exists():
-                gitdir_mod.ensure_external_gitdir(root, gitdir_mod.default_gitdir_root())
+                gitdir_mod.ensure_external_gitdir(
+                    root, gitdir_mod.default_gitdir_root()
+                )
 
         sources = list(self.resolve_mounts())
-        entries: dict[str, nuefs._nuefs.ManifestEntry] = {}
+        entries: dict[str, nuefs.ManifestEntry] = {}
         for _, resolved in sources:
             entries.update(resolved)
 
-        self._print_tree(sources, entries)
+        print_tree(root, sources, entries)
 
         if self.dry_run:
             return
 
-        nuefs.mount(root, list(entries.values()))
+        mount(root, list(entries.values()))
         console.print(
             Panel(
                 "Mount created, but your current shell is already inside the directory.\n"
@@ -73,44 +75,6 @@ class Mount(NueBaseCommand):
                 border_style="yellow",
             )
         )
-
-    def _print_tree(
-        self,
-        sources: list[tuple[MountEntry, dict[str, nuefs._nuefs.ManifestEntry]]],
-        entries: dict[str, nuefs._nuefs.ManifestEntry],
-    ) -> None:
-        source_tree = Tree(f"[bold blue]{self.root}[/] [dim](sources)[/]")
-        for mount, resolved in sources:
-            branch = source_tree.add(f"[bold yellow]{mount.source}[/]")
-            self._render_entries(branch, resolved)
-        console.print(source_tree)
-        console.print()
-
-        merged_tree = Tree(f"[bold blue]{self.root}[/] [dim](merged)[/]")
-        self._render_entries(merged_tree, entries)
-        console.print(merged_tree)
-
-    @staticmethod
-    def _render_entries(
-        root_node: Tree, entries: dict[str, nuefs._nuefs.ManifestEntry]
-    ) -> None:
-        nodes: dict[str, Tree] = {"": root_node}
-
-        def _ensure_parent(path: str) -> Tree:
-            if path in nodes:
-                return nodes[path]
-            parent, _, name = path.rpartition("/")
-            node = _ensure_parent(parent).add(f"[bold cyan]{name}/[/]")
-            nodes[path] = node
-            return node
-
-        for entry in sorted(entries.values(), key=lambda e: e.virtual_path):
-            parent, _, name = entry.virtual_path.rpartition("/")
-            if entry.is_dir:
-                label = f"[bold cyan]{name}/[/] [dim]→ {entry.backend_path}[/]"
-            else:
-                label = f"{name} [dim]→ {entry.backend_path}[/]"
-            nodes[entry.virtual_path] = _ensure_parent(parent).add(label)
 
 
 class Unmount(Command, app_name="nue"):

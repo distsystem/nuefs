@@ -5,6 +5,8 @@ import pathlib
 from typing import Literal
 
 import pydantic
+from rich.tree import Tree
+from sheaves.console import console
 from sheaves.sheaf import Sheaf
 from sheaves.typing import Pathspec
 
@@ -142,3 +144,39 @@ class Manifest(Sheaf, app_name="nue"):
             if resolved:
                 yield mount, resolved
 
+
+def print_tree(
+    root: pathlib.Path,
+    sources: list[tuple[MountEntry, dict[str, _ext.ManifestEntry]]],
+    entries: dict[str, _ext.ManifestEntry],
+) -> None:
+    source_tree = Tree(f"[bold blue]{root}[/] [dim](sources)[/]")
+    for mount_entry, resolved in sources:
+        branch = source_tree.add(f"[bold yellow]{mount_entry.source}[/]")
+        _render_entries(branch, resolved)
+    console.print(source_tree)
+    console.print()
+
+    merged_tree = Tree(f"[bold blue]{root}[/] [dim](merged)[/]")
+    _render_entries(merged_tree, entries)
+    console.print(merged_tree)
+
+
+def _render_entries(root_node: Tree, entries: dict[str, _ext.ManifestEntry]) -> None:
+    nodes: dict[str, Tree] = {"": root_node}
+
+    def _ensure_parent(path: str) -> Tree:
+        if path in nodes:
+            return nodes[path]
+        parent, _, name = path.rpartition("/")
+        node = _ensure_parent(parent).add(f"[bold cyan]{name}/[/]")
+        nodes[path] = node
+        return node
+
+    for entry in sorted(entries.values(), key=lambda e: e.virtual_path):
+        parent, _, name = entry.virtual_path.rpartition("/")
+        if entry.is_dir:
+            label = f"[bold cyan]{name}/[/] [dim]→ {entry.backend_path}[/]"
+        else:
+            label = f"{name} [dim]→ {entry.backend_path}[/]"
+        nodes[entry.virtual_path] = _ensure_parent(parent).add(label)
