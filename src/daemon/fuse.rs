@@ -1,5 +1,4 @@
-use std::ffi::{CString, OsStr, OsString};
-use std::os::unix::ffi::OsStrExt;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -9,9 +8,10 @@ use easy_fuser::templates::DefaultFuseHandler;
 use easy_fuser::types::errors::{ErrorKind, PosixError};
 use easy_fuser::unix_fs;
 use parking_lot::RwLock;
+use rustix::fd::OwnedFd;
 use tracing::debug;
 
-use super::manager::{DirTarget, Manifest, ResolvedPaths};
+use super::manager::{DualPath, Manifest};
 
 pub(crate) struct NueFs {
     manifest: Arc<RwLock<Manifest>>,
@@ -74,17 +74,13 @@ impl NueFs {
         PosixError::new(kind, e.to_string())
     }
 
-    fn resolve_paths(&self, rel_path: &str) -> ResolvedPaths {
+    fn resolve_dual(&self, rel_path: &str) -> DualPath {
         self.manifest.read().resolve_paths(rel_path)
     }
 
-    fn create_target(&self, parent_rel: &str) -> DirTarget {
-        self.manifest.read().create_target(parent_rel)
-    }
-
     fn get_file_attr(&self, rel_path: &str) -> FuseResult<FileAttribute> {
-        let resolved = self.resolve_paths(rel_path);
-        unix_fs::lookup(&resolved.io_path).map(|a| self.with_ttl(a))
+        let resolved = self.resolve_dual(rel_path);
+        unix_fs::lookup(&resolved.io).map(|a| self.with_ttl(a))
     }
 
     fn read_dir_children(path: &Path) -> Vec<(String, bool)> {
@@ -115,103 +111,55 @@ impl NueFs {
         base
     }
 
-    fn cstring_from_path(path: &Path) -> Result<CString, PosixError> {
-        CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-            PosixError::new(
-                ErrorKind::InvalidArgument,
-                format!("{}: invalid path", path.display()),
-            )
-        })
+    fn map_rustix_error(e: rustix::io::Errno, context: &str) -> PosixError {
+        PosixError::new(
+            match e {
+                rustix::io::Errno::NOENT => ErrorKind::FileNotFound,
+                rustix::io::Errno::ACCESS | rustix::io::Errno::PERM => ErrorKind::PermissionDenied,
+                _ => ErrorKind::InputOutputError,
+            },
+            format!("{context}: {e}"),
+        )
     }
 
     fn apply_setattr(path: &Path, request: &SetAttrRequest) -> Result<(), PosixError> {
-        let c_path = Self::cstring_from_path(path)?;
-
         if let Some(mode) = request.mode {
-            let result = unsafe { libc::chmod(c_path.as_ptr(), mode) };
-            if result < 0 {
-                return Err(PosixError::last_error(format!(
-                    "{}: chmod failed",
-                    path.display()
-                )));
-            }
+            rustix::fs::chmodat(rustix::fs::CWD, path, rustix::fs::Mode::from_raw_mode(mode), rustix::fs::AtFlags::empty())
+                .map_err(|e| Self::map_rustix_error(e, &format!("{}: chmod", path.display())))?;
         }
 
         if request.uid.is_some() || request.gid.is_some() {
-            let uid = request.uid.map(|u| u as libc::uid_t).unwrap_or(u32::MAX);
-            let gid = request.gid.map(|g| g as libc::gid_t).unwrap_or(u32::MAX);
-            let result = unsafe {
-                libc::fchownat(
-                    libc::AT_FDCWD,
-                    c_path.as_ptr(),
-                    uid,
-                    gid,
-                    libc::AT_SYMLINK_NOFOLLOW,
-                )
-            };
-            if result < 0 {
-                return Err(PosixError::last_error(format!(
-                    "{}: chown failed",
-                    path.display()
-                )));
-            }
+            let uid = request.uid.map(|u| rustix::fs::Uid::from_raw(u));
+            let gid = request.gid.map(|g| rustix::fs::Gid::from_raw(g));
+            rustix::fs::chownat(rustix::fs::CWD, path, uid, gid, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|e| Self::map_rustix_error(e, &format!("{}: chown", path.display())))?;
         }
 
         if let Some(size) = request.size {
-            let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
-            if fd < 0 {
-                return Err(PosixError::last_error(format!(
-                    "{}: open failed for truncate",
-                    path.display()
-                )));
-            }
-
-            let result = unsafe { libc::ftruncate(fd, size as libc::off_t) };
-            unsafe { libc::close(fd) };
-            if result < 0 {
-                return Err(PosixError::last_error(format!(
-                    "{}: truncate failed",
-                    path.display()
-                )));
-            }
+            let fd: OwnedFd = rustix::fs::open(path, rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())
+                .map_err(|e| Self::map_rustix_error(e, &format!("{}: open for truncate", path.display())))?;
+            rustix::fs::ftruncate(&fd, size)
+                .map_err(|e| Self::map_rustix_error(e, &format!("{}: truncate", path.display())))?;
         }
 
         if request.atime.is_some() || request.mtime.is_some() {
-            let to_timespec = |t: Option<fuser::TimeOrNow>| -> libc::timespec {
+            let to_timespec = |t: Option<fuser::TimeOrNow>| -> rustix::fs::Timespec {
                 match t {
-                    Some(fuser::TimeOrNow::Now) => libc::timespec {
-                        tv_sec: 0,
-                        tv_nsec: libc::UTIME_NOW,
-                    },
+                    Some(fuser::TimeOrNow::Now) => rustix::fs::Timespec { tv_sec: 0, tv_nsec: rustix::fs::UTIME_NOW },
                     Some(fuser::TimeOrNow::SpecificTime(st)) => {
                         let d = st.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-                        libc::timespec {
-                            tv_sec: d.as_secs() as libc::time_t,
-                            tv_nsec: d.subsec_nanos() as libc::c_long,
-                        }
+                        rustix::fs::Timespec { tv_sec: d.as_secs() as rustix::fs::Secs, tv_nsec: d.subsec_nanos() as rustix::fs::Nsecs }
                     }
-                    None => libc::timespec {
-                        tv_sec: 0,
-                        tv_nsec: libc::UTIME_OMIT,
-                    },
+                    None => rustix::fs::Timespec { tv_sec: 0, tv_nsec: rustix::fs::UTIME_OMIT },
                 }
             };
 
-            let times = [to_timespec(request.atime), to_timespec(request.mtime)];
-            let result = unsafe {
-                libc::utimensat(
-                    libc::AT_FDCWD,
-                    c_path.as_ptr(),
-                    times.as_ptr(),
-                    libc::AT_SYMLINK_NOFOLLOW,
-                )
+            let times = rustix::fs::Timestamps {
+                last_access: to_timespec(request.atime),
+                last_modification: to_timespec(request.mtime),
             };
-            if result < 0 {
-                return Err(PosixError::last_error(format!(
-                    "{}: utimensat failed",
-                    path.display()
-                )));
-            }
+            rustix::fs::utimensat(rustix::fs::CWD, path, &times, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|e| Self::map_rustix_error(e, &format!("{}: utimensat", path.display())))?;
         }
 
         Ok(())
@@ -284,26 +232,39 @@ impl FuseHandler<PathBuf> for NueFs {
         _file_handle: BorrowedFileHandle<'_>,
     ) -> FuseResult<Vec<(OsString, FileAttribute)>> {
         let rel_path = Self::to_rel_string(&file_id);
+        let parent_rel = Self::to_rel_string(&Self::parent_path(&file_id));
         debug!(path = %Self::display_path(&file_id), "FUSE readdirplus");
 
-        let plan = self.manifest.read().readdir_plan(&rel_path);
+        // Single lock: resolve all paths and merge children.
+        let manifest = self.manifest.read();
+        let plan = manifest.readdir_plan(&rel_path);
+        let dot_io = manifest.resolve_paths(&rel_path).io;
+        let dotdot_io = manifest.resolve_paths(&parent_rel).io;
+
         let base = Self::read_dir_children(&plan.io_dir);
         let children = Self::merge_children(base, plan.manifest_children);
 
+        let child_ios: Vec<(String, PathBuf)> = children
+            .into_iter()
+            .map(|(name, _)| {
+                let child_rel =
+                    Self::to_rel_string(&Self::join_child(&file_id, OsStr::new(&name)));
+                let io = manifest.resolve_paths(&child_rel).io;
+                (name, io)
+            })
+            .collect();
+        drop(manifest);
+
         let mut entries: Vec<(OsString, FileAttribute)> = Vec::new();
 
-        if let Ok(attr) = self.get_file_attr(&rel_path) {
+        if let Ok(attr) = unix_fs::lookup(&dot_io).map(|a| self.with_ttl(a)) {
             entries.push((".".into(), attr));
         }
-
-        let parent_rel = Self::to_rel_string(&Self::parent_path(&file_id));
-        if let Ok(attr) = self.get_file_attr(&parent_rel) {
+        if let Ok(attr) = unix_fs::lookup(&dotdot_io).map(|a| self.with_ttl(a)) {
             entries.push(("..".into(), attr));
         }
-
-        for (name, _is_dir) in children {
-            let child_rel = Self::to_rel_string(&Self::join_child(&file_id, OsStr::new(&name)));
-            if let Ok(attr) = self.get_file_attr(&child_rel) {
+        for (name, io) in child_ios {
+            if let Ok(attr) = unix_fs::lookup(&io).map(|a| self.with_ttl(a)) {
                 entries.push((OsString::from(name), attr));
             }
         }
@@ -320,8 +281,8 @@ impl FuseHandler<PathBuf> for NueFs {
         let rel_path = Self::to_rel_string(&file_id);
         debug!(path = %Self::display_path(&file_id), ?flags, "FUSE open");
 
-        let resolved = self.resolve_paths(&rel_path);
-        let fd = unix_fs::open(&resolved.io_path, flags | OpenFlags::CLOSE_ON_EXEC)?;
+        let resolved = self.resolve_dual(&rel_path);
+        let fd = unix_fs::open(&resolved.io, flags | OpenFlags::CLOSE_ON_EXEC)?;
         let handle = OwnedFileHandle::from_owned_fd(fd).ok_or_else(Self::bad_file_handle)?;
         Ok((handle, FUSEOpenResponseFlags::empty()))
     }
@@ -340,9 +301,9 @@ impl FuseHandler<PathBuf> for NueFs {
         let child_rel = Self::to_rel_string(&child_path);
         debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), mode, "FUSE create");
 
-        let target = self.create_target(&rel_parent);
-        let io_path = target.io_dir.join(name);
-        let display_path = target.display_dir.join(name);
+        let target = self.resolve_dual(&rel_parent);
+        let io_path = target.io.join(name);
+        let display_path = target.display.join(name);
 
         let (fd, attr) = unix_fs::create(&io_path, mode, umask, flags | OpenFlags::CLOSE_ON_EXEC)?;
         let handle = OwnedFileHandle::from_owned_fd(fd).ok_or_else(Self::bad_file_handle)?;
@@ -367,9 +328,9 @@ impl FuseHandler<PathBuf> for NueFs {
         let child_rel = Self::to_rel_string(&child_path);
         debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), mode, "FUSE mkdir");
 
-        let target = self.create_target(&rel_parent);
-        let io_path = target.io_dir.join(name);
-        let display_path = target.display_dir.join(name);
+        let target = self.resolve_dual(&rel_parent);
+        let io_path = target.io.join(name);
+        let display_path = target.display.join(name);
 
         let attr = unix_fs::mkdir(&io_path, mode, umask)?;
         self.manifest
@@ -382,8 +343,8 @@ impl FuseHandler<PathBuf> for NueFs {
         let rel_path = Self::to_rel_string(&file_id);
         debug!(path = %Self::display_path(&file_id), "FUSE readlink");
 
-        let resolved = self.resolve_paths(&rel_path);
-        unix_fs::readlink(&resolved.io_path)
+        let resolved = self.resolve_dual(&rel_path);
+        unix_fs::readlink(&resolved.io)
     }
 
     fn symlink(
@@ -398,9 +359,9 @@ impl FuseHandler<PathBuf> for NueFs {
         let child_rel = Self::to_rel_string(&child_path);
         debug!(parent = %Self::display_path(&parent_id), name = %link_name.to_string_lossy(), target = %target.display(), "FUSE symlink");
 
-        let target_dir = self.create_target(&parent_rel);
-        let io_path = target_dir.io_dir.join(link_name);
-        let display_path = target_dir.display_dir.join(link_name);
+        let target_dir = self.resolve_dual(&parent_rel);
+        let io_path = target_dir.io.join(link_name);
+        let display_path = target_dir.display.join(link_name);
 
         let attr = unix_fs::symlink(&io_path, target)?;
         self.manifest
@@ -422,12 +383,12 @@ impl FuseHandler<PathBuf> for NueFs {
         let new_rel = Self::to_rel_string(&new_path);
         debug!(old = %Self::display_path(&file_id), newparent = %Self::display_path(&newparent), newname = %newname.to_string_lossy(), "FUSE link");
 
-        let old_paths = self.resolve_paths(&old_rel);
-        let target_dir = self.create_target(&newparent_rel);
-        let new_io = target_dir.io_dir.join(newname);
-        let new_display = target_dir.display_dir.join(newname);
+        let old_paths = self.resolve_dual(&old_rel);
+        let target_dir = self.resolve_dual(&newparent_rel);
+        let new_io = target_dir.io.join(newname);
+        let new_display = target_dir.display.join(newname);
 
-        std::fs::hard_link(&old_paths.io_path, &new_io).map_err(Self::map_std_io_error)?;
+        std::fs::hard_link(&old_paths.io, &new_io).map_err(Self::map_std_io_error)?;
         let attr = unix_fs::lookup(&new_io)?;
         self.manifest
             .write()
@@ -440,8 +401,8 @@ impl FuseHandler<PathBuf> for NueFs {
         let child_rel = Self::to_rel_string(&child_path);
         debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), path = %child_rel, "FUSE unlink");
 
-        let resolved = self.resolve_paths(&child_rel);
-        unix_fs::unlink(&resolved.io_path)?;
+        let resolved = self.resolve_dual(&child_rel);
+        unix_fs::unlink(&resolved.io)?;
         self.manifest.write().remove_entry(&child_rel);
         Ok(())
     }
@@ -451,8 +412,8 @@ impl FuseHandler<PathBuf> for NueFs {
         let child_rel = Self::to_rel_string(&child_path);
         debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), "FUSE rmdir");
 
-        let resolved = self.resolve_paths(&child_rel);
-        unix_fs::rmdir(&resolved.io_path)?;
+        let resolved = self.resolve_dual(&child_rel);
+        unix_fs::rmdir(&resolved.io)?;
         self.manifest.write().remove_entry(&child_rel);
         Ok(())
     }
@@ -473,16 +434,16 @@ impl FuseHandler<PathBuf> for NueFs {
         let newparent_rel = Self::to_rel_string(&newparent);
         debug!(old = %Self::display_path(&old_path), new = %Self::display_path(&new_path), ?flags, "FUSE rename");
 
-        let old_paths = self.resolve_paths(&old_rel);
-        let target_dir = self.create_target(&newparent_rel);
-        let new_io = target_dir.io_dir.join(newname);
-        let new_display = target_dir.display_dir.join(newname);
+        let old_paths = self.resolve_dual(&old_rel);
+        let target_dir = self.resolve_dual(&newparent_rel);
+        let new_io = target_dir.io.join(newname);
+        let new_display = target_dir.display.join(newname);
 
-        unix_fs::rename(&old_paths.io_path, &new_io, flags)?;
+        unix_fs::rename(&old_paths.io, &new_io, flags)?;
         self.manifest.write().rename_entry_with_backend(
             &old_rel,
             &new_rel,
-            &old_paths.display_path,
+            &old_paths.display,
             &new_display,
         );
         Ok(())
@@ -497,10 +458,10 @@ impl FuseHandler<PathBuf> for NueFs {
         let rel_path = Self::to_rel_string(&file_id);
         debug!(path = %Self::display_path(&file_id), "FUSE setattr");
 
-        let resolved = self.resolve_paths(&rel_path);
-        Self::apply_setattr(&resolved.io_path, &request)?;
+        let resolved = self.resolve_dual(&rel_path);
+        Self::apply_setattr(&resolved.io, &request)?;
 
-        let attr = unix_fs::lookup(&resolved.io_path)?;
+        let attr = unix_fs::lookup(&resolved.io)?;
         Ok(self.with_ttl(attr))
     }
 }

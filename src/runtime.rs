@@ -12,6 +12,6 @@ pub fn default_socket_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
 
-    let uid = unsafe { libc::geteuid() };
+    let uid = rustix::process::getuid().as_raw();
     base.join(format!("nuefsd-{uid}.sock"))
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use easy_fuser::prelude::BackgroundSession;
@@ -231,15 +231,9 @@ struct Entry {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ResolvedPaths {
-    pub(crate) display_path: PathBuf,
-    pub(crate) io_path: PathBuf,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct DirTarget {
-    pub(crate) display_dir: PathBuf,
-    pub(crate) io_dir: PathBuf,
+pub(crate) struct DualPath {
+    pub(crate) display: PathBuf,
+    pub(crate) io: PathBuf,
 }
 
 pub(crate) struct ReaddirPlan {
@@ -259,25 +253,17 @@ impl Manifest {
     /// Used for cache invalidation notifications.
     pub(crate) fn entry_names_at(&self, prefix: &str) -> Vec<String> {
         let prefix = prefix.trim_start_matches('/');
-        let prefix_with_slash = if prefix.is_empty() {
-            String::new()
-        } else {
-            format!("{prefix}/")
-        };
-
-        let mut names = Vec::new();
-        for rel_path in self.entries.keys() {
-            if prefix.is_empty() {
-                if !rel_path.contains('/') {
-                    names.push(rel_path.clone());
-                }
-            } else if let Some(rest) = rel_path.strip_prefix(&prefix_with_slash) {
-                if !rest.contains('/') {
-                    names.push(rest.to_string());
-                }
-            }
-        }
-        names
+        self.entries
+            .keys()
+            .filter_map(|key| {
+                let rest = if prefix.is_empty() {
+                    key.as_str()
+                } else {
+                    key.strip_prefix(prefix)?.strip_prefix('/')?
+                };
+                (!rest.contains('/')).then(|| rest.to_string())
+            })
+            .collect()
     }
 }
 
@@ -290,16 +276,7 @@ impl Manifest {
         let real_procfd_root = procfd_root(real_root_fd);
         let mut map = HashMap::new();
         for e in entries {
-            let io_backend = if e.backend_path.starts_with(&display_root) {
-                let rel = e
-                    .backend_path
-                    .strip_prefix(&display_root)
-                    .unwrap_or_else(|_| e.backend_path.as_path());
-                real_procfd_root.join(rel)
-            } else {
-                e.backend_path.clone()
-            };
-
+            let io_backend = to_io_backend(&display_root, &real_procfd_root, &e.backend_path);
             map.insert(
                 e.virtual_path,
                 Entry {
@@ -327,77 +304,42 @@ impl Manifest {
         }
     }
 
+    fn resolve_entry<'a>(&'a self, path: &'a str) -> Option<(&'a Entry, &'a str)> {
+        if let Some(entry) = self.entries.get(path) {
+            return Some((entry, ""));
+        }
+        self.find_dir_prefix(path)
+    }
+
     pub(crate) fn which(&self, path: &str) -> Option<OwnerInfoWire> {
         let path = path.trim_start_matches('/');
-
-        if let Some(entry) = self.entries.get(path) {
-            return Some(OwnerInfoWire {
-                owner: self.owner_label(&entry.display_backend),
-                backend_path: entry.display_backend.clone(),
-            });
-        }
-
-        if let Some((entry, suffix)) = self.find_dir_prefix(path) {
-            let backend_path = join_path(&entry.display_backend, suffix);
-            return Some(OwnerInfoWire {
-                owner: self.owner_label(&entry.display_backend),
-                backend_path,
-            });
-        }
-
-        None
+        let (entry, suffix) = self.resolve_entry(path)?;
+        let backend_path = join_path(&entry.display_backend, suffix);
+        Some(OwnerInfoWire {
+            owner: self.owner_label(&entry.display_backend),
+            backend_path,
+        })
     }
 
-    pub(crate) fn resolve_paths(&self, path: &str) -> ResolvedPaths {
+    pub(crate) fn resolve_paths(&self, path: &str) -> DualPath {
         let path = path.trim_start_matches('/');
 
-        if let Some(entry) = self.entries.get(path) {
-            return ResolvedPaths {
-                display_path: entry.display_backend.clone(),
-                io_path: entry.io_backend.clone(),
+        if let Some((entry, suffix)) = self.resolve_entry(path) {
+            return DualPath {
+                display: join_path(&entry.display_backend, suffix),
+                io: join_path(&entry.io_backend, suffix),
             };
         }
 
-        if let Some((entry, suffix)) = self.find_dir_prefix(path) {
-            return ResolvedPaths {
-                display_path: join_path(&entry.display_backend, suffix),
-                io_path: join_path(&entry.io_backend, suffix),
-            };
-        }
-
-        // With a root entry (""), this should be unreachable.
-        // Defensive fallback to display_root if no entry matches.
         warn!(path, "no matching entry found, falling back to display_root");
-        ResolvedPaths {
-            display_path: self.display_root.join(path),
-            io_path: self.real_procfd_root.join(path),
+        DualPath {
+            display: self.display_root.join(path),
+            io: self.real_procfd_root.join(path),
         }
     }
 
-    pub(crate) fn create_target(&self, parent_path: &str) -> DirTarget {
-        let parent_path = parent_path.trim_start_matches('/');
-
-        if let Some(entry) = self.entries.get(parent_path) {
-            if entry.is_dir {
-                return DirTarget {
-                    display_dir: entry.display_backend.clone(),
-                    io_dir: entry.io_backend.clone(),
-                };
-            }
-        }
-
-        if let Some((entry, suffix)) = self.find_dir_prefix(parent_path) {
-            return DirTarget {
-                display_dir: join_path(&entry.display_backend, suffix),
-                io_dir: join_path(&entry.io_backend, suffix),
-            };
-        }
-
-        warn!(parent_path, "no matching entry found, falling back to display_root");
-        DirTarget {
-            display_dir: self.display_root.join(parent_path),
-            io_dir: self.real_procfd_root.join(parent_path),
-        }
+    pub(crate) fn create_target(&self, parent_path: &str) -> DualPath {
+        self.resolve_paths(parent_path)
     }
 
     pub(crate) fn readdir_plan(&self, path: &str) -> ReaddirPlan {
@@ -418,7 +360,7 @@ impl Manifest {
 
         let target = self.create_target(prefix);
         ReaddirPlan {
-            io_dir: target.io_dir,
+            io_dir: target.io,
             manifest_children,
         }
     }
@@ -467,14 +409,7 @@ impl Manifest {
     ) {
         let path = path.trim_start_matches('/');
 
-        let io_backend = if backend_path.starts_with(&self.display_root) {
-            let rel = backend_path
-                .strip_prefix(&self.display_root)
-                .unwrap_or_else(|_| backend_path.as_path());
-            self.real_procfd_root.join(rel)
-        } else {
-            backend_path.clone()
-        };
+        let io_backend = to_io_backend(&self.display_root, &self.real_procfd_root, &backend_path);
 
         self.entries.insert(
             path.to_string(),
@@ -553,6 +488,13 @@ impl Manifest {
     }
 }
 
+fn to_io_backend(display_root: &Path, procfd_root: &Path, backend: &Path) -> PathBuf {
+    backend
+        .strip_prefix(display_root)
+        .map(|rel| procfd_root.join(rel))
+        .unwrap_or_else(|_| backend.to_path_buf())
+}
+
 fn procfd_root(raw_fd: i32) -> PathBuf {
     PathBuf::from("/proc/self/fd")
         .join(raw_fd.to_string())
@@ -609,16 +551,16 @@ mod tests {
         let manifest = Manifest::from_entries(root.clone(), raw_fd, entries);
 
         let p = manifest.resolve_paths("real.txt");
-        assert_eq!(p.display_path, root.join("real.txt"));
-        assert_eq!(p.io_path, procfd_root(raw_fd).join("real.txt"));
+        assert_eq!(p.display, root.join("real.txt"));
+        assert_eq!(p.io, procfd_root(raw_fd).join("real.txt"));
 
         let p = manifest.resolve_paths("vendor/a.txt");
-        assert_eq!(p.display_path, PathBuf::from("/opt/vendor").join("a.txt"));
-        assert_eq!(p.io_path, PathBuf::from("/opt/vendor").join("a.txt"));
+        assert_eq!(p.display, PathBuf::from("/opt/vendor").join("a.txt"));
+        assert_eq!(p.io, PathBuf::from("/opt/vendor").join("a.txt"));
 
         let p = manifest.resolve_paths("missing.txt");
-        assert_eq!(p.display_path, root.join("missing.txt"));
-        assert_eq!(p.io_path, procfd_root(raw_fd).join("missing.txt"));
+        assert_eq!(p.display, root.join("missing.txt"));
+        assert_eq!(p.io, procfd_root(raw_fd).join("missing.txt"));
 
         drop(root_fd);
         std::fs::remove_dir_all(&root).unwrap();
@@ -650,14 +592,14 @@ mod tests {
 
         let target = manifest.create_target("vendor/subdir");
         assert_eq!(
-            target.display_dir,
+            target.display,
             PathBuf::from("/opt/vendor").join("subdir")
         );
-        assert_eq!(target.io_dir, PathBuf::from("/opt/vendor").join("subdir"));
+        assert_eq!(target.io, PathBuf::from("/opt/vendor").join("subdir"));
 
         let target = manifest.create_target("local");
-        assert_eq!(target.display_dir, root.join("local"));
-        assert_eq!(target.io_dir, procfd_root(raw_fd).join("local"));
+        assert_eq!(target.display, root.join("local"));
+        assert_eq!(target.io, procfd_root(raw_fd).join("local"));
 
         drop(root_fd);
         std::fs::remove_dir_all(&root).unwrap();
