@@ -2,13 +2,3 @@ apiVersion: nue/v1
 mounts:
   - source: ./
     exclude: []
-  - source: ../sheaves/
-    exclude:
-      - .venv/
-      - .git/
-      - .pixi/
-      - .mypy_cache/
-      - .pytest_cache/
-      - .ruff_cache/
-      - __pycache__/
-      - "*.pyc"

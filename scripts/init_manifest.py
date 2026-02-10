@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-from sheaves.typing import LocalPath
-
 from nuefs.manifest import Manifest, MountEntry
 
 
@@ -13,13 +11,13 @@ def create_example_manifest() -> Manifest:
         mounts=[
             MountEntry(
                 source="~/repos/example",
-                target=LocalPath("."),
+                dest=".",
                 exclude=["*.pyc", "__pycache__/", ".git/"],
                 include=["src/", "tests/"],
             ),
             MountEntry(
                 source="~/local/lib",
-                target=LocalPath("vendor/lib"),
+                dest="vendor/lib",
             ),
         ],
     )

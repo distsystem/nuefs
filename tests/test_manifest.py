@@ -3,9 +3,8 @@
 import pathlib
 
 import pytest
-from sheaves.typing import Pathspec
 
-from nuefs.manifest import DEFAULT_EXCLUDE, Manifest, MountEntry
+from nuefs.manifest import DEFAULT_EXCLUDE, Manifest, MountEntry, Pathspec
 
 
 class TestMountEntry:

@@ -17,6 +17,7 @@ pygit2 = "*"
 humanize = "*"
 pathspec = "*"
 pydantic = ">=2.0"
+rich = ">=13.0"
 packageurl-python = "*"
 universal-pathlib = "*"
 
@@ -28,7 +29,6 @@ maturin = "*"
 uv = "*"
 
 [pypi-dependencies]
-sheaves = { path = "../sheaves", editable = false }
 nuefs = { path = ".", editable = true }
 
 [feature.build.activation.env]

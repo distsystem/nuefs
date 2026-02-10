@@ -1,16 +1,51 @@
 """NueFS manifest models (nue.yaml)."""
 
 import collections.abc
+import os
 import pathlib
-from typing import Literal
+import typing
+from collections.abc import Iterable, Iterator
+from typing import Any, Literal
 
+import pathspec as _pathspec
 import pydantic
+import rich
+import yaml
 from rich.tree import Tree
-from sheaves.console import console
-from sheaves.sheaf import Sheaf
-from sheaves.typing import Pathspec
 
 import nuefs._nuefs as _ext
+
+console = rich.get_console()
+
+type Pathable = str | os.PathLike[str]
+
+
+class Pathspec(pydantic.RootModel[list[str]]):
+    """Gitignore-style pattern list with matching capabilities."""
+
+    root: list[str] = pydantic.Field(default_factory=list)
+    _spec: _pathspec.PathSpec = pydantic.PrivateAttr()
+
+    def model_post_init(self, __context: Any) -> None:
+        self._spec = _pathspec.PathSpec.from_lines("gitignore", self.root)
+
+    def __len__(self) -> int:
+        return len(self.root)
+
+    def match(self, path: Pathable) -> bool:
+        if not self.root:
+            return False
+        return bool(self._spec.match_file(str(path)))
+
+    def include[P: Pathable](self, paths: Iterable[P]) -> Iterator[P]:
+        if not self.root:
+            return iter([])
+        return (p for p in paths if self.match(p))
+
+    def exclude[P: Pathable](self, paths: Iterable[P]) -> Iterator[P]:
+        if not self.root:
+            return iter(paths)
+        return (p for p in paths if not self.match(p))
 
 # Default excludes: caches, build artifacts, VCS directories
 DEFAULT_EXCLUDE = Pathspec(
@@ -125,20 +160,24 @@ class MountEntry(pydantic.BaseModel):
             yield vpath, path, is_dir
 
 
-class Manifest(Sheaf, app_name="nue"):
+class Manifest(pydantic.BaseModel):
     """NueFS manifest (nue.yaml)."""
 
     apiVersion: Literal["nue/v1"] = "nue/v1"
     mounts: list[MountEntry] = pydantic.Field(default_factory=list)
 
-    @property
-    def root(self) -> pathlib.Path:
-        return self.sheaf_source.parent
+    @classmethod
+    def load(
+        cls, path: pathlib.Path = pathlib.Path("nue.yaml"),
+    ) -> tuple[typing.Self, pathlib.Path]:
+        resolved = path.expanduser().resolve()
+        data = yaml.safe_load(resolved.read_text()) or {}
+        return cls.model_validate(data), resolved.parent
 
     def resolve_mounts(
-        self,
+        self, root: pathlib.Path,
     ) -> collections.abc.Iterator[tuple[MountEntry, dict[str, _ext.ManifestEntry]]]:
-        root = self.root.expanduser().resolve()
+        root = root.expanduser().resolve()
         for mount in self.mounts:
             resolved = mount.resolve(root)
             if resolved:

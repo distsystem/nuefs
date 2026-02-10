@@ -3,14 +3,15 @@ import pathlib
 import subprocess
 import sys
 import time
-from typing import Annotated
 
+import rich
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, CliSubCommand, SettingsConfigDict, get_subcommand
 from rich.panel import Panel
-from sheaves.annotations import Commands, Flag, Option
-from sheaves.cli import Command, cli
-from sheaves.console import console
 
 import nuefs
+
+console = rich.get_console()
 
 from . import gitdir as gitdir_mod
 from .manifest import Manifest, print_tree
@@ -35,17 +36,14 @@ def _lazy_unmount(root: pathlib.Path) -> None:
     raise RuntimeError(msg)
 
 
-class NueBaseCommand(Manifest, Command, app_name="nue"):
-    pass
-
-
-class Mount(NueBaseCommand):
-    dry_run: Annotated[
-        bool, Flag(help="Show virtual tree without mounting", short="-n")
-    ] = False
+class Mount(BaseSettings):
+    dry_run: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("n", "dry_run"),
+    )
 
     def run(self) -> None:
-        root = self.root
+        manifest, root = Manifest.load()
 
         if not self.dry_run:
             git_path = root / ".git"
@@ -54,7 +52,7 @@ class Mount(NueBaseCommand):
                     root, gitdir_mod.default_gitdir_root()
                 )
 
-        sources = list(self.resolve_mounts())
+        sources = list(manifest.resolve_mounts(root))
         entries: dict[str, nuefs.ManifestEntry] = {}
         for _, resolved in sources:
             entries.update(resolved)
@@ -77,11 +75,11 @@ class Mount(NueBaseCommand):
             )
 
 
-class Unmount(Command, app_name="nue"):
-    root: Annotated[
-        pathlib.Path,
-        Option(help="Mount root path to unmount", short="-r", metavar="PATH"),
-    ] = pathlib.Path(".")
+class Unmount(BaseSettings):
+    root: pathlib.Path = Field(
+        default=pathlib.Path("."),
+        validation_alias=AliasChoices("r", "root"),
+    )
 
     def run(self) -> None:
         root_path = self.root.expanduser()
@@ -102,7 +100,7 @@ class Unmount(Command, app_name="nue"):
                 return
 
 
-class Status(NueBaseCommand):
+class Status(BaseSettings):
     def run(self) -> None:
         import humanize
 
@@ -122,7 +120,7 @@ class Status(NueBaseCommand):
         console.print(Panel("\n".join(lines), title="nuefsd", border_style="dim"))
 
 
-class Stop(Command, app_name="nue"):
+class Stop(BaseSettings):
     def run(self) -> None:
         socket_path = nuefs.default_socket_path()
         if not _daemon_running(socket_path):
@@ -145,8 +143,18 @@ def _daemon_running(socket_path: pathlib.Path) -> bool:
         return False
 
 
+class Nue(BaseSettings):
+    model_config = SettingsConfigDict(cli_parse_args=True, cli_implicit_flags=True)
+
+    mount: CliSubCommand[Mount]
+    unmount: CliSubCommand[Unmount]
+    status: CliSubCommand[Status]
+    stop: CliSubCommand[Stop]
+
+
 def main() -> int:
-    cli(Annotated[Mount | Unmount | Status | Stop, Commands()]).run()
+    cmd = get_subcommand(Nue())
+    cmd.run()
     return 0
 
 

@@ -7,7 +7,7 @@ name = "nuefs"
 version = "0.1.0"
 requires-python = ">=3.12"
 description = "NueFS - FUSE-based layered filesystem for Python"
-dependencies = ["sheaves"]
+dependencies = ["pydantic-settings>=2.0", "pyyaml", "rich>=13.0", "pathspec"]
 
 [project.scripts]
 nue = "nuefs.cli:main"
