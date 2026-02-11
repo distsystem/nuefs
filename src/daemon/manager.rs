@@ -8,7 +8,7 @@ use easy_fuser::prelude::BackgroundSession;
 use easy_fuser::prelude::MountOption;
 use parking_lot::RwLock;
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::types::{ManifestEntry, MountStatus, OwnerInfoWire};
 
@@ -331,7 +331,7 @@ impl Manifest {
             };
         }
 
-        warn!(path, "no matching entry found, falling back to display_root");
+        trace!(path, "no matching entry found, falling back to display_root");
         DualPath {
             display: self.display_root.join(path),
             io: self.real_procfd_root.join(path),

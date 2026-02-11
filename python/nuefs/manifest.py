@@ -8,6 +8,7 @@ from collections.abc import Iterable, Iterator
 from typing import Any, Literal
 
 import pathspec as _pathspec
+import pygit2
 import pydantic
 import rich
 import yaml
@@ -62,6 +63,7 @@ class MountEntry(pydantic.BaseModel):
     dest: str = ""
     exclude: Pathspec = pydantic.Field(default=DEFAULT_EXCLUDE)
     include: Pathspec = pydantic.Field(default_factory=Pathspec)
+    vcs: bool = True
 
     def resolve(self, root: pathlib.Path) -> dict[str, _ext.ManifestEntry]:
         """Resolve this mount entry into ManifestEntry mappings."""
@@ -125,6 +127,31 @@ class MountEntry(pydantic.BaseModel):
 
         return source, prefix, expand_contents
 
+    def _git_toplevel_items(
+        self, source: pathlib.Path,
+    ) -> list[tuple[pathlib.Path, str, bool]] | None:
+        """Use pygit2 index to enumerate tracked top-level items under *source*.
+
+        Returns None if *source* is not a git repo (caller falls back to
+        iterdir).
+        """
+        try:
+            repo = pygit2.Repository(source)
+        except pygit2.GitError:
+            return None
+
+        seen: dict[str, bool] = {}
+        for entry in repo.index:
+            top = entry.path.split("/", 1)[0]
+            if top not in seen:
+                seen[top] = "/" in entry.path
+
+        items: list[tuple[pathlib.Path, str, bool]] = []
+        for name, is_dir in seen.items():
+            if not self._is_excluded(name, is_dir=is_dir):
+                items.append((source / name, name, is_dir))
+        return items
+
     def _iter_entries(
         self,
         root: pathlib.Path,
@@ -147,13 +174,20 @@ class MountEntry(pydantic.BaseModel):
             yield prefix, source, True
             return
 
-        # Trailing slash: expand contents
-        for item in source.iterdir():
-            is_dir = item.is_dir() and not item.is_symlink()
-            name = item.name
-            if self._is_excluded(name, is_dir=is_dir):
-                continue
-            path = item
+        # Trailing slash: expand contents – use git index when vcs=True
+        git_items = self._git_toplevel_items(source) if self.vcs else None
+        if git_items is not None:
+            items = git_items
+        else:
+            items = [
+                (item, item.name, item.is_dir() and not item.is_symlink())
+                for item in source.iterdir()
+                if not self._is_excluded(
+                    item.name, is_dir=item.is_dir() and not item.is_symlink(),
+                )
+            ]
+
+        for path, name, is_dir in items:
             if is_dir:
                 path, name = self._collapse_chain(path, name)
             vpath = f"{prefix}/{name}" if prefix else name
