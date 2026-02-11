@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
 
-use crate::types::{ManifestEntry, MountStatus, OwnerInfoWire};
+use crate::types::{ManifestEntry, MountRoot, MountStatus, OwnerInfoWire};
 
 use super::fuse::NueFs;
 
@@ -60,6 +60,7 @@ impl Manager {
         &mut self,
         root: PathBuf,
         entries: Vec<ManifestEntry>,
+        mount_roots: Vec<MountRoot>,
     ) -> Result<u64, ManagerError> {
         let entry_count = entries.len();
         let root = root
@@ -77,6 +78,7 @@ impl Manager {
             root.clone(),
             real_root_fd.as_raw_fd(),
             entries,
+            mount_roots,
         )));
         let fs = NueFs::new(manifest.clone());
 
@@ -182,6 +184,7 @@ impl Manager {
         &mut self,
         mount_id: u64,
         entries: Vec<ManifestEntry>,
+        mount_roots: Vec<MountRoot>,
     ) -> Result<(), ManagerError> {
         let entry_count = entries.len();
         let session = self
@@ -193,6 +196,7 @@ impl Manager {
             session.root.clone(),
             session.real_root_fd.as_raw_fd(),
             entries,
+            mount_roots,
         );
 
         let old_root_children = session.manifest.read().entry_names_at("");
@@ -232,28 +236,40 @@ struct Entry {
 
 #[derive(Clone, Debug)]
 pub(crate) struct DualPath {
+    #[allow(dead_code)]
     pub(crate) display: PathBuf,
     pub(crate) io: PathBuf,
 }
 
+#[derive(Clone, Debug)]
+struct MountRootEntry {
+    virtual_prefix: String,
+    display_backend: PathBuf,
+    io_backend: PathBuf,
+}
+
 pub(crate) struct ReaddirPlan {
-    pub(crate) io_dir: PathBuf,
-    pub(crate) manifest_children: Vec<(String, bool)>,
+    pub(crate) io_dirs: Vec<PathBuf>,
+    pub(crate) origin_children: Vec<(String, bool)>,
 }
 
 /// Manifest: maps virtual paths to their backend sources.
+///
+/// Stateless design: `origins` (immutable snapshot) + `mount_roots` (ordered
+/// mount root list) replace the old mutable `entries` HashMap.
 pub(crate) struct Manifest {
     display_root: PathBuf,
     real_procfd_root: PathBuf,
-    entries: HashMap<String, Entry>,
+    origins: HashMap<String, Entry>,
+    mount_roots: Vec<MountRootEntry>,
 }
 
 impl Manifest {
-    /// Get direct child names from entries only (not from filesystem).
+    /// Get direct child names from origins only (not from filesystem).
     /// Used for cache invalidation notifications.
     pub(crate) fn entry_names_at(&self, prefix: &str) -> Vec<String> {
         let prefix = prefix.trim_start_matches('/');
-        self.entries
+        self.origins
             .keys()
             .filter_map(|key| {
                 let rest = if prefix.is_empty() {
@@ -272,6 +288,7 @@ impl Manifest {
         display_root: PathBuf,
         real_root_fd: i32,
         entries: Vec<ManifestEntry>,
+        mount_roots: Vec<MountRoot>,
     ) -> Self {
         let real_procfd_root = procfd_root(real_root_fd);
         let mut map = HashMap::new();
@@ -287,10 +304,23 @@ impl Manifest {
             );
         }
 
+        let mr_entries: Vec<MountRootEntry> = mount_roots
+            .into_iter()
+            .map(|mr| {
+                let io = to_io_backend(&display_root, &real_procfd_root, &mr.backend_path);
+                MountRootEntry {
+                    virtual_prefix: mr.virtual_prefix,
+                    display_backend: mr.backend_path,
+                    io_backend: io,
+                }
+            })
+            .collect();
+
         Self {
             display_root,
             real_procfd_root,
-            entries: map,
+            origins: map,
+            mount_roots: mr_entries,
         }
     }
 
@@ -304,8 +334,8 @@ impl Manifest {
         }
     }
 
-    fn resolve_entry<'a>(&'a self, path: &'a str) -> Option<(&'a Entry, &'a str)> {
-        if let Some(entry) = self.entries.get(path) {
+    fn resolve_from_origins<'a>(&'a self, path: &'a str) -> Option<(&'a Entry, &'a str)> {
+        if let Some(entry) = self.origins.get(path) {
             return Some((entry, ""));
         }
         self.find_dir_prefix(path)
@@ -313,24 +343,56 @@ impl Manifest {
 
     pub(crate) fn which(&self, path: &str) -> Option<OwnerInfoWire> {
         let path = path.trim_start_matches('/');
-        let (entry, suffix) = self.resolve_entry(path)?;
-        let backend_path = join_path(&entry.display_backend, suffix);
-        Some(OwnerInfoWire {
-            owner: self.owner_label(&entry.display_backend),
-            backend_path,
-        })
+
+        if let Some((entry, suffix)) = self.resolve_from_origins(path) {
+            let backend_path = join_path(&entry.display_backend, suffix);
+            return Some(OwnerInfoWire {
+                owner: self.owner_label(&entry.display_backend),
+                backend_path,
+            });
+        }
+
+        // mount_roots scan
+        for mr in &self.mount_roots {
+            if let Some(suffix) = strip_mount_prefix(path, &mr.virtual_prefix) {
+                let candidate = mr.display_backend.join(suffix);
+                if candidate.symlink_metadata().is_ok() {
+                    return Some(OwnerInfoWire {
+                        owner: self.owner_label(&mr.display_backend),
+                        backend_path: candidate,
+                    });
+                }
+            }
+        }
+
+        None
     }
 
     pub(crate) fn resolve_paths(&self, path: &str) -> DualPath {
         let path = path.trim_start_matches('/');
 
-        if let Some((entry, suffix)) = self.resolve_entry(path) {
+        // 1. origins (exact match + dir prefix)
+        if let Some((entry, suffix)) = self.resolve_from_origins(path) {
             return DualPath {
                 display: join_path(&entry.display_backend, suffix),
                 io: join_path(&entry.io_backend, suffix),
             };
         }
 
+        // 2. mount_roots scan: first existing path wins
+        for mr in &self.mount_roots {
+            if let Some(suffix) = strip_mount_prefix(path, &mr.virtual_prefix) {
+                let io_candidate = mr.io_backend.join(suffix);
+                if io_candidate.symlink_metadata().is_ok() {
+                    return DualPath {
+                        display: mr.display_backend.join(suffix),
+                        io: io_candidate,
+                    };
+                }
+            }
+        }
+
+        // 3. fallback
         trace!(path, "no matching entry found, falling back to display_root");
         DualPath {
             display: self.display_root.join(path),
@@ -338,14 +400,36 @@ impl Manifest {
         }
     }
 
-    pub(crate) fn create_target(&self, parent_path: &str) -> DualPath {
-        self.resolve_paths(parent_path)
+    pub(crate) fn resolve_io(&self, path: &str) -> PathBuf {
+        self.resolve_paths(path).io
+    }
+
+    pub(crate) fn create_target_io(&self, parent_path: &str, child_name: &str) -> PathBuf {
+        let parent_path = parent_path.trim_start_matches('/');
+        let child_key = if parent_path.is_empty() {
+            child_name.to_string()
+        } else {
+            format!("{parent_path}/{child_name}")
+        };
+
+        if let Some(entry) = self.origins.get(&child_key) {
+            if entry.is_dir {
+                return entry.io_backend.clone();
+            }
+            return entry
+                .io_backend
+                .parent()
+                .unwrap_or(&entry.io_backend)
+                .to_path_buf();
+        }
+
+        self.resolve_io(parent_path)
     }
 
     pub(crate) fn readdir_plan(&self, path: &str) -> ReaddirPlan {
         let prefix = path.trim_start_matches('/');
 
-        let manifest_children: Vec<(String, bool)> = self
+        let origin_children: Vec<(String, bool)> = self
             .entry_names_at(prefix)
             .into_iter()
             .filter_map(|name| {
@@ -354,14 +438,41 @@ impl Manifest {
                 } else {
                     format!("{prefix}/{name}")
                 };
-                self.entries.get(&child_path).map(|e| (name, e.is_dir))
+                self.origins.get(&child_path).map(|e| (name, e.is_dir))
             })
             .collect();
 
-        let target = self.create_target(prefix);
+        let mut io_dirs: Vec<PathBuf> = Vec::new();
+
+        // origins (exact match + dir prefix) → add its io_backend
+        if let Some((entry, suffix)) = self.resolve_from_origins(prefix) {
+            if suffix.is_empty() && entry.is_dir || !suffix.is_empty() {
+                io_dirs.push(join_path(&entry.io_backend, suffix));
+            }
+        }
+
+        // mount_roots matching this prefix
+        for mr in &self.mount_roots {
+            if let Some(suffix) = strip_mount_prefix(prefix, &mr.virtual_prefix) {
+                let candidate = mr.io_backend.join(suffix);
+                if candidate.is_dir() {
+                    io_dirs.push(candidate);
+                }
+            }
+        }
+
+        // Fallback: if no io_dirs found, use procfd root
+        if io_dirs.is_empty() {
+            if prefix.is_empty() {
+                io_dirs.push(self.real_procfd_root.clone());
+            } else {
+                io_dirs.push(self.real_procfd_root.join(prefix));
+            }
+        }
+
         ReaddirPlan {
-            io_dir: target.io,
-            manifest_children,
+            io_dirs,
+            origin_children,
         }
     }
 
@@ -369,13 +480,12 @@ impl Manifest {
         let mut best: Option<(&Entry, &str)> = None;
         let mut best_len: Option<usize> = None;
 
-        for (entry_path, entry) in &self.entries {
+        for (entry_path, entry) in &self.origins {
             if !entry.is_dir {
                 continue;
             }
 
             if entry_path.is_empty() {
-                // Root entry "" matches everything
                 if best_len.is_none() {
                     best = Some((entry, path));
                 }
@@ -400,92 +510,17 @@ impl Manifest {
 
         best
     }
+}
 
-    pub(crate) fn add_entry_with_backend(
-        &mut self,
-        path: &str,
-        backend_path: PathBuf,
-        is_dir: bool,
-    ) {
-        let path = path.trim_start_matches('/');
-
-        let io_backend = to_io_backend(&self.display_root, &self.real_procfd_root, &backend_path);
-
-        self.entries.insert(
-            path.to_string(),
-            Entry {
-                display_backend: backend_path,
-                io_backend,
-                is_dir,
-            },
-        );
+fn strip_mount_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    if prefix.is_empty() {
+        return Some(path);
     }
-
-    pub(crate) fn remove_entry(&mut self, path: &str) {
-        let path = path.trim_start_matches('/');
-        self.entries.remove(path);
+    if path == prefix {
+        return Some("");
     }
-
-    pub(crate) fn rename_entry_with_backend(
-        &mut self,
-        old_path: &str,
-        new_path: &str,
-        old_backend: &PathBuf,
-        new_backend: &PathBuf,
-    ) {
-        let old_path = old_path.trim_start_matches('/');
-        let new_path = new_path.trim_start_matches('/');
-
-        if old_path.is_empty() {
-            return;
-        }
-
-        let old_prefix = if old_path.ends_with('/') {
-            old_path.to_string()
-        } else {
-            format!("{old_path}/")
-        };
-
-        let mut to_move = Vec::new();
-        for key in self.entries.keys() {
-            if key == old_path || key.starts_with(&old_prefix) {
-                to_move.push(key.clone());
-            }
-        }
-
-        for key in to_move {
-            let Some(entry) = self.entries.remove(&key) else {
-                continue;
-            };
-
-            let new_key = if key == old_path {
-                new_path.to_string()
-            } else {
-                let suffix = key.strip_prefix(old_path).unwrap_or("");
-                if new_path.is_empty() {
-                    suffix.trim_start_matches('/').to_string()
-                } else {
-                    format!("{new_path}{suffix}")
-                }
-            };
-
-            // Update backend_path if it was under the old backend
-            let updated_backend = entry
-                .display_backend
-                .strip_prefix(old_backend)
-                .ok()
-                .map(|suffix| {
-                    if suffix.as_os_str().is_empty() {
-                        new_backend.clone()
-                    } else {
-                        new_backend.join(suffix)
-                    }
-                })
-                .unwrap_or(entry.display_backend);
-
-            self.add_entry_with_backend(&new_key, updated_backend, entry.is_dir);
-        }
-    }
+    let rest = path.strip_prefix(prefix)?;
+    rest.strip_prefix('/')
 }
 
 fn to_io_backend(display_root: &Path, procfd_root: &Path, backend: &Path) -> PathBuf {
@@ -548,7 +583,7 @@ mod tests {
             },
         ];
 
-        let manifest = Manifest::from_entries(root.clone(), raw_fd, entries);
+        let manifest = Manifest::from_entries(root.clone(), raw_fd, entries, vec![]);
 
         let p = manifest.resolve_paths("real.txt");
         assert_eq!(p.display, root.join("real.txt"));
@@ -561,6 +596,39 @@ mod tests {
         let p = manifest.resolve_paths("missing.txt");
         assert_eq!(p.display, root.join("missing.txt"));
         assert_eq!(p.io, procfd_root(raw_fd).join("missing.txt"));
+
+        drop(root_fd);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn create_target_uses_origin_after_rename() {
+        let root = make_tmp_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+
+        let root_fd = File::open(&root).unwrap();
+        let raw_fd = root_fd.as_raw_fd();
+
+        let entries = vec![ManifestEntry {
+            virtual_path: "config.toml".to_string(),
+            backend_path: PathBuf::from("/ext/project/config.toml"),
+            is_dir: false,
+        }];
+
+        let manifest = Manifest::from_entries(root.clone(), raw_fd, entries, vec![]);
+
+        // origins still has config.toml → create should reuse its backend
+        assert_eq!(
+            manifest.create_target_io("", "config.toml"),
+            PathBuf::from("/ext/project")
+        );
+
+        // Unrelated file → fallback to mount root
+        assert_eq!(
+            manifest.create_target_io("", "new_file.txt"),
+            procfd_root(raw_fd)
+        );
 
         drop(root_fd);
         std::fs::remove_dir_all(&root).unwrap();
@@ -588,18 +656,133 @@ mod tests {
             },
         ];
 
-        let manifest = Manifest::from_entries(root.clone(), raw_fd, entries);
+        let manifest = Manifest::from_entries(root.clone(), raw_fd, entries, vec![]);
 
-        let target = manifest.create_target("vendor/subdir");
         assert_eq!(
-            target.display,
-            PathBuf::from("/opt/vendor").join("subdir")
+            manifest.create_target_io("vendor", "lib.py"),
+            PathBuf::from("/opt/vendor")
         );
-        assert_eq!(target.io, PathBuf::from("/opt/vendor").join("subdir"));
 
-        let target = manifest.create_target("local");
-        assert_eq!(target.display, root.join("local"));
-        assert_eq!(target.io, procfd_root(raw_fd).join("local"));
+        assert_eq!(
+            manifest.create_target_io("", "local.txt"),
+            procfd_root(raw_fd)
+        );
+
+        drop(root_fd);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn resolve_paths_scans_mount_roots() {
+        let root = make_tmp_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+
+        // Create backend dirs with files
+        let backend_a = root.join("_backend_a");
+        let backend_b = root.join("_backend_b");
+        std::fs::create_dir_all(&backend_a).unwrap();
+        std::fs::create_dir_all(&backend_b).unwrap();
+        std::fs::write(backend_a.join("a.txt"), "a").unwrap();
+        std::fs::write(backend_b.join("b.txt"), "b").unwrap();
+
+        let root_fd = File::open(&root).unwrap();
+        let raw_fd = root_fd.as_raw_fd();
+
+        let mount_roots = vec![
+            MountRoot {
+                virtual_prefix: "".to_string(),
+                backend_path: backend_a.clone(),
+            },
+            MountRoot {
+                virtual_prefix: "".to_string(),
+                backend_path: backend_b.clone(),
+            },
+        ];
+
+        let manifest = Manifest::from_entries(root.clone(), raw_fd, vec![], mount_roots);
+
+        // a.txt exists in backend_a → first mount root wins
+        let p = manifest.resolve_paths("a.txt");
+        assert_eq!(p.io, procfd_root(raw_fd).join("_backend_a/a.txt"));
+
+        // b.txt only exists in backend_b → second mount root
+        let p = manifest.resolve_paths("b.txt");
+        assert_eq!(p.io, procfd_root(raw_fd).join("_backend_b/b.txt"));
+
+        // nonexistent → fallback to display_root
+        let p = manifest.resolve_paths("missing.txt");
+        assert_eq!(p.display, root.join("missing.txt"));
+
+        drop(root_fd);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn readdir_plan_merges_multiple_backends() {
+        let root = make_tmp_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+
+        let backend_a = root.join("_backend_a");
+        let backend_b = root.join("_backend_b");
+        std::fs::create_dir_all(&backend_a).unwrap();
+        std::fs::create_dir_all(&backend_b).unwrap();
+        std::fs::write(backend_a.join("shared.txt"), "a").unwrap();
+        std::fs::write(backend_a.join("only_a.txt"), "a").unwrap();
+        std::fs::write(backend_b.join("shared.txt"), "b").unwrap();
+        std::fs::write(backend_b.join("only_b.txt"), "b").unwrap();
+
+        let root_fd = File::open(&root).unwrap();
+        let raw_fd = root_fd.as_raw_fd();
+
+        let mount_roots = vec![
+            MountRoot {
+                virtual_prefix: "".to_string(),
+                backend_path: backend_a.clone(),
+            },
+            MountRoot {
+                virtual_prefix: "".to_string(),
+                backend_path: backend_b.clone(),
+            },
+        ];
+
+        let manifest = Manifest::from_entries(root.clone(), raw_fd, vec![], mount_roots);
+        let plan = manifest.readdir_plan("");
+
+        assert_eq!(plan.io_dirs.len(), 2);
+        assert_eq!(plan.origin_children.len(), 0);
+
+        drop(root_fd);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn resolve_paths_with_prefixed_mount_root() {
+        let root = make_tmp_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+
+        let vendor_dir = root.join("_vendor");
+        std::fs::create_dir_all(&vendor_dir).unwrap();
+        std::fs::write(vendor_dir.join("lib.py"), "pass").unwrap();
+
+        let root_fd = File::open(&root).unwrap();
+        let raw_fd = root_fd.as_raw_fd();
+
+        let mount_roots = vec![MountRoot {
+            virtual_prefix: "vendor".to_string(),
+            backend_path: vendor_dir.clone(),
+        }];
+
+        let manifest = Manifest::from_entries(root.clone(), raw_fd, vec![], mount_roots);
+
+        let p = manifest.resolve_paths("vendor/lib.py");
+        assert_eq!(p.io, procfd_root(raw_fd).join("_vendor/lib.py"));
+
+        // Path outside prefix → fallback
+        let p = manifest.resolve_paths("other.txt");
+        assert_eq!(p.display, root.join("other.txt"));
 
         drop(root_fd);
         std::fs::remove_dir_all(&root).unwrap();

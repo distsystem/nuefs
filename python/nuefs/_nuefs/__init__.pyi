@@ -8,6 +8,7 @@ import typing
 __all__ = [
     "DaemonInfo",
     "ManifestEntry",
+    "MountRoot",
     "OwnerInfo",
     "RawHandle",
 ]
@@ -68,6 +69,21 @@ class ManifestEntry:
     def __get_pydantic_core_schema__(cls, _source: typing.Any, _handler: typing.Any) -> typing.Any: ...
 
 @typing.final
+class MountRoot:
+    r"""
+    Mount root mapping for filesystem scanning.
+    """
+    @property
+    def virtual_prefix(self) -> builtins.str: ...
+    @virtual_prefix.setter
+    def virtual_prefix(self, value: builtins.str) -> None: ...
+    @property
+    def backend_path(self) -> pathlib.Path: ...
+    @backend_path.setter
+    def backend_path(self, value: pathlib.Path) -> None: ...
+    def __new__(cls, virtual_prefix: builtins.str, backend_path: builtins.str | os.PathLike | pathlib.Path) -> MountRoot: ...
+
+@typing.final
 class OwnerInfo:
     r"""
     Information about which backend owns a path.
@@ -97,7 +113,7 @@ def _default_socket_path() -> pathlib.Path:
     Get the default socket path for the daemon.
     """
 
-def _mount(root: builtins.str | os.PathLike | pathlib.Path, entries: typing.Sequence[ManifestEntry]) -> RawHandle:
+def _mount(root: builtins.str | os.PathLike | pathlib.Path, entries: typing.Sequence[ManifestEntry], mount_roots: typing.Sequence[MountRoot]) -> RawHandle:
     r"""
     Create a new mount.
     """
@@ -122,7 +138,7 @@ def _unmount(mount_id: builtins.int) -> None:
     Unmount by mount_id.
     """
 
-def _update(mount_id: builtins.int, entries: typing.Sequence[ManifestEntry]) -> None:
+def _update(mount_id: builtins.int, entries: typing.Sequence[ManifestEntry], mount_roots: typing.Sequence[MountRoot]) -> None:
     r"""
     Update mount manifest.
     """

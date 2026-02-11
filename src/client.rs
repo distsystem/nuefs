@@ -8,7 +8,7 @@ use tarpc::tokio_serde::formats::Bincode;
 use thiserror::Error;
 use tracing::info;
 
-use crate::types::{DaemonInfo, ManifestEntry, MountStatus, NuefsServiceClient, OwnerInfoWire};
+use crate::types::{DaemonInfo, ManifestEntry, MountRoot, MountStatus, NuefsServiceClient, OwnerInfoWire};
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -80,8 +80,8 @@ impl Client {
         self.call(f)?.map_err(ClientError::Daemon)
     }
 
-    pub fn mount(&self, root: PathBuf, entries: Vec<ManifestEntry>) -> Result<u64, ClientError> {
-        self.call_daemon(|ctx| self.inner.mount(ctx, root, entries))
+    pub fn mount(&self, root: PathBuf, entries: Vec<ManifestEntry>, mount_roots: Vec<MountRoot>) -> Result<u64, ClientError> {
+        self.call_daemon(|ctx| self.inner.mount(ctx, root, entries, mount_roots))
     }
 
     pub fn unmount(&self, mount_id: u64) -> Result<(), ClientError> {
@@ -100,8 +100,8 @@ impl Client {
         self.call(|ctx| self.inner.daemon_info(ctx))
     }
 
-    pub fn update(&self, mount_id: u64, entries: Vec<ManifestEntry>) -> Result<(), ClientError> {
-        self.call_daemon(|ctx| self.inner.update(ctx, mount_id, entries))
+    pub fn update(&self, mount_id: u64, entries: Vec<ManifestEntry>, mount_roots: Vec<MountRoot>) -> Result<(), ClientError> {
+        self.call_daemon(|ctx| self.inner.update(ctx, mount_id, entries, mount_roots))
     }
 
     pub fn resolve(&self, root: PathBuf) -> Result<Option<u64>, ClientError> {

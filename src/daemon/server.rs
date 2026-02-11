@@ -12,7 +12,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::types::{DaemonInfo, ManifestEntry, MountStatus, NuefsService, OwnerInfoWire};
+use crate::types::{DaemonInfo, ManifestEntry, MountRoot, MountStatus, NuefsService, OwnerInfoWire};
 
 use super::manager::{Manager, ManagerError};
 
@@ -54,10 +54,11 @@ impl NuefsService for NuefsServer {
         _: tarpc::context::Context,
         root: PathBuf,
         entries: Vec<ManifestEntry>,
+        mount_roots: Vec<MountRoot>,
     ) -> Result<u64, String> {
         let entry_count = entries.len();
         info!(root = %root.display(), entries = entry_count, "RPC mount");
-        let result = self.manager_call(|m| m.mount(root, entries)).await;
+        let result = self.manager_call(|m| m.mount(root, entries, mount_roots)).await;
         match &result {
             Ok(mount_id) => info!(mount_id, "mount succeeded"),
             Err(e) => warn!(error = %e, "mount failed"),
@@ -104,10 +105,11 @@ impl NuefsService for NuefsServer {
         _: tarpc::context::Context,
         mount_id: u64,
         entries: Vec<ManifestEntry>,
+        mount_roots: Vec<MountRoot>,
     ) -> Result<(), String> {
         let entry_count = entries.len();
         info!(mount_id, entries = entry_count, "RPC update");
-        let result = self.manager_call(|m| m.update(mount_id, entries)).await;
+        let result = self.manager_call(|m| m.update(mount_id, entries, mount_roots)).await;
         match &result {
             Ok(()) => info!(mount_id, "update succeeded"),
             Err(e) => warn!(mount_id, error = %e, "update failed"),

@@ -140,6 +140,38 @@ impl From<ManifestEntry> for types::ManifestEntry {
     }
 }
 
+/// Mount root mapping for filesystem scanning.
+#[gen_stub_pyclass]
+#[pyclass]
+#[derive(Clone, Debug)]
+pub struct MountRoot {
+    #[pyo3(get, set)]
+    pub virtual_prefix: String,
+    #[pyo3(get, set)]
+    pub backend_path: PathBuf,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl MountRoot {
+    #[new]
+    fn new(virtual_prefix: String, backend_path: PathBuf) -> Self {
+        Self {
+            virtual_prefix,
+            backend_path,
+        }
+    }
+}
+
+impl From<MountRoot> for types::MountRoot {
+    fn from(m: MountRoot) -> Self {
+        Self {
+            virtual_prefix: m.virtual_prefix,
+            backend_path: m.backend_path,
+        }
+    }
+}
+
 /// Information about which backend owns a path.
 #[gen_stub_pyclass]
 #[pyclass]
@@ -178,15 +210,16 @@ pub struct RawHandle {
 /// Create a new mount.
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn _mount(root: PathBuf, entries: Vec<ManifestEntry>) -> PyResult<RawHandle> {
+fn _mount(root: PathBuf, entries: Vec<ManifestEntry>, mount_roots: Vec<MountRoot>) -> PyResult<RawHandle> {
     let root = root.canonicalize().map_err(|e| {
         PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Invalid root path: {e}"))
     })?;
 
     let entries: Vec<types::ManifestEntry> = entries.into_iter().map(Into::into).collect();
+    let mount_roots: Vec<types::MountRoot> = mount_roots.into_iter().map(Into::into).collect();
 
     let client = Client::new().map_err(to_pyerr)?;
-    let mount_id = client.mount(root.clone(), entries).map_err(to_pyerr)?;
+    let mount_id = client.mount(root.clone(), entries, mount_roots).map_err(to_pyerr)?;
 
     Ok(RawHandle { root, mount_id })
 }
@@ -242,11 +275,12 @@ fn _which(mount_id: u64, path: String) -> PyResult<Option<OwnerInfo>> {
 /// Update mount manifest.
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn _update(mount_id: u64, entries: Vec<ManifestEntry>) -> PyResult<()> {
+fn _update(mount_id: u64, entries: Vec<ManifestEntry>, mount_roots: Vec<MountRoot>) -> PyResult<()> {
     let entries: Vec<types::ManifestEntry> = entries.into_iter().map(Into::into).collect();
+    let mount_roots: Vec<types::MountRoot> = mount_roots.into_iter().map(Into::into).collect();
 
     let client = Client::new().map_err(to_pyerr)?;
-    client.update(mount_id, entries).map_err(to_pyerr)
+    client.update(mount_id, entries, mount_roots).map_err(to_pyerr)
 }
 
 /// Resolve an existing mount by root. Returns mount_id if found.
@@ -279,6 +313,7 @@ fn to_pyerr(err: crate::client::ClientError) -> PyErr {
 #[pymodule]
 fn _nuefs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ManifestEntry>()?;
+    m.add_class::<MountRoot>()?;
     m.add_class::<RawHandle>()?;
     m.add_class::<OwnerInfo>()?;
     m.add_class::<DaemonInfo>()?;

@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 use rustix::fd::OwnedFd;
 use tracing::debug;
 
-use super::manager::{DualPath, Manifest};
+use super::manager::Manifest;
 
 pub(crate) struct NueFs {
     manifest: Arc<RwLock<Manifest>>,
@@ -74,13 +74,28 @@ impl NueFs {
         PosixError::new(kind, e.to_string())
     }
 
-    fn resolve_dual(&self, rel_path: &str) -> DualPath {
-        self.manifest.read().resolve_paths(rel_path)
+    fn resolve_io(&self, rel_path: &str) -> PathBuf {
+        self.manifest.read().resolve_io(rel_path)
+    }
+
+    fn resolve_child_io(&self, parent: &Path, name: &OsStr) -> PathBuf {
+        let child_path = Self::join_child(parent, name);
+        let child_rel = Self::to_rel_string(&child_path);
+        self.manifest.read().resolve_io(&child_rel)
+    }
+
+    fn create_io(&self, parent: &Path, name: &OsStr) -> PathBuf {
+        let rel_parent = Self::to_rel_string(parent);
+        let name_str = name.to_string_lossy();
+        self.manifest
+            .read()
+            .create_target_io(&rel_parent, &name_str)
+            .join(name)
     }
 
     fn get_file_attr(&self, rel_path: &str) -> FuseResult<FileAttribute> {
-        let resolved = self.resolve_dual(rel_path);
-        unix_fs::lookup(&resolved.io).map(|a| self.with_ttl(a))
+        let io = self.resolve_io(rel_path);
+        unix_fs::lookup(&io).map(|a| self.with_ttl(a))
     }
 
     fn read_dir_children(path: &Path) -> Vec<(String, bool)> {
@@ -98,17 +113,30 @@ impl NueFs {
             .collect()
     }
 
-    fn merge_children(
-        mut base: Vec<(String, bool)>,
-        manifest_children: Vec<(String, bool)>,
+    fn merge_multi_dir_children(
+        io_dirs: &[PathBuf],
+        origin_children: Vec<(String, bool)>,
     ) -> Vec<(String, bool)> {
-        let existing: std::collections::HashSet<_> = base.iter().map(|(n, _)| n.clone()).collect();
-        for (name, is_dir) in manifest_children {
-            if !existing.contains(&name) {
-                base.push((name, is_dir));
+        let mut seen = std::collections::HashSet::new();
+        let mut result: Vec<(String, bool)> = Vec::new();
+
+        // First: filesystem children from each io_dir (first occurrence wins)
+        for dir in io_dirs {
+            for (name, is_dir) in Self::read_dir_children(dir) {
+                if seen.insert(name.clone()) {
+                    result.push((name, is_dir));
+                }
             }
         }
-        base
+
+        // Then: origin children (collapsed chains, non-physical dirs, etc.)
+        for (name, is_dir) in origin_children {
+            if seen.insert(name.clone()) {
+                result.push((name, is_dir));
+            }
+        }
+
+        result
     }
 
     fn map_rustix_error(e: rustix::io::Errno, context: &str) -> PosixError {
@@ -206,8 +234,7 @@ impl FuseHandler<PathBuf> for NueFs {
         debug!(path = %Self::display_path(&file_id), "FUSE readdir");
 
         let plan = self.manifest.read().readdir_plan(&rel_path);
-        let base = Self::read_dir_children(&plan.io_dir);
-        let children = Self::merge_children(base, plan.manifest_children);
+        let children = Self::merge_multi_dir_children(&plan.io_dirs, plan.origin_children);
 
         let mut entries: Vec<(OsString, FileKind)> = Vec::with_capacity(children.len() + 2);
         entries.push((".".into(), FileKind::Directory));
@@ -235,21 +262,19 @@ impl FuseHandler<PathBuf> for NueFs {
         let parent_rel = Self::to_rel_string(&Self::parent_path(&file_id));
         debug!(path = %Self::display_path(&file_id), "FUSE readdirplus");
 
-        // Single lock: resolve all paths and merge children.
         let manifest = self.manifest.read();
         let plan = manifest.readdir_plan(&rel_path);
-        let dot_io = manifest.resolve_paths(&rel_path).io;
-        let dotdot_io = manifest.resolve_paths(&parent_rel).io;
+        let dot_io = manifest.resolve_io(&rel_path);
+        let dotdot_io = manifest.resolve_io(&parent_rel);
 
-        let base = Self::read_dir_children(&plan.io_dir);
-        let children = Self::merge_children(base, plan.manifest_children);
+        let children = Self::merge_multi_dir_children(&plan.io_dirs, plan.origin_children);
 
         let child_ios: Vec<(String, PathBuf)> = children
             .into_iter()
             .map(|(name, _)| {
                 let child_rel =
                     Self::to_rel_string(&Self::join_child(&file_id, OsStr::new(&name)));
-                let io = manifest.resolve_paths(&child_rel).io;
+                let io = manifest.resolve_io(&child_rel);
                 (name, io)
             })
             .collect();
@@ -281,8 +306,8 @@ impl FuseHandler<PathBuf> for NueFs {
         let rel_path = Self::to_rel_string(&file_id);
         debug!(path = %Self::display_path(&file_id), ?flags, "FUSE open");
 
-        let resolved = self.resolve_dual(&rel_path);
-        let fd = unix_fs::open(&resolved.io, flags | OpenFlags::CLOSE_ON_EXEC)?;
+        let io = self.resolve_io(&rel_path);
+        let fd = unix_fs::open(&io, flags | OpenFlags::CLOSE_ON_EXEC)?;
         let handle = OwnedFileHandle::from_owned_fd(fd).ok_or_else(Self::bad_file_handle)?;
         Ok((handle, FUSEOpenResponseFlags::empty()))
     }
@@ -296,21 +321,11 @@ impl FuseHandler<PathBuf> for NueFs {
         umask: u32,
         flags: OpenFlags,
     ) -> FuseResult<(OwnedFileHandle, FileAttribute, FUSEOpenResponseFlags)> {
-        let rel_parent = Self::to_rel_string(&parent_id);
-        let child_path = Self::join_child(&parent_id, name);
-        let child_rel = Self::to_rel_string(&child_path);
         debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), mode, "FUSE create");
 
-        let target = self.resolve_dual(&rel_parent);
-        let io_path = target.io.join(name);
-        let display_path = target.display.join(name);
-
+        let io_path = self.create_io(&parent_id, name);
         let (fd, attr) = unix_fs::create(&io_path, mode, umask, flags | OpenFlags::CLOSE_ON_EXEC)?;
         let handle = OwnedFileHandle::from_owned_fd(fd).ok_or_else(Self::bad_file_handle)?;
-
-        self.manifest
-            .write()
-            .add_entry_with_backend(&child_rel, display_path, false);
 
         Ok((handle, self.with_ttl(attr), FUSEOpenResponseFlags::empty()))
     }
@@ -323,19 +338,10 @@ impl FuseHandler<PathBuf> for NueFs {
         mode: u32,
         umask: u32,
     ) -> FuseResult<FileAttribute> {
-        let rel_parent = Self::to_rel_string(&parent_id);
-        let child_path = Self::join_child(&parent_id, name);
-        let child_rel = Self::to_rel_string(&child_path);
         debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), mode, "FUSE mkdir");
 
-        let target = self.resolve_dual(&rel_parent);
-        let io_path = target.io.join(name);
-        let display_path = target.display.join(name);
-
+        let io_path = self.create_io(&parent_id, name);
         let attr = unix_fs::mkdir(&io_path, mode, umask)?;
-        self.manifest
-            .write()
-            .add_entry_with_backend(&child_rel, display_path, true);
         Ok(self.with_ttl(attr))
     }
 
@@ -343,8 +349,7 @@ impl FuseHandler<PathBuf> for NueFs {
         let rel_path = Self::to_rel_string(&file_id);
         debug!(path = %Self::display_path(&file_id), "FUSE readlink");
 
-        let resolved = self.resolve_dual(&rel_path);
-        unix_fs::readlink(&resolved.io)
+        unix_fs::readlink(&self.resolve_io(&rel_path))
     }
 
     fn symlink(
@@ -354,19 +359,10 @@ impl FuseHandler<PathBuf> for NueFs {
         link_name: &OsStr,
         target: &Path,
     ) -> FuseResult<FileAttribute> {
-        let parent_rel = Self::to_rel_string(&parent_id);
-        let child_path = Self::join_child(&parent_id, link_name);
-        let child_rel = Self::to_rel_string(&child_path);
         debug!(parent = %Self::display_path(&parent_id), name = %link_name.to_string_lossy(), target = %target.display(), "FUSE symlink");
 
-        let target_dir = self.resolve_dual(&parent_rel);
-        let io_path = target_dir.io.join(link_name);
-        let display_path = target_dir.display.join(link_name);
-
+        let io_path = self.create_io(&parent_id, link_name);
         let attr = unix_fs::symlink(&io_path, target)?;
-        self.manifest
-            .write()
-            .add_entry_with_backend(&child_rel, display_path, false);
         Ok(self.with_ttl(attr))
     }
 
@@ -378,43 +374,27 @@ impl FuseHandler<PathBuf> for NueFs {
         newname: &OsStr,
     ) -> FuseResult<FileAttribute> {
         let old_rel = Self::to_rel_string(&file_id);
-        let newparent_rel = Self::to_rel_string(&newparent);
-        let new_path = Self::join_child(&newparent, newname);
-        let new_rel = Self::to_rel_string(&new_path);
         debug!(old = %Self::display_path(&file_id), newparent = %Self::display_path(&newparent), newname = %newname.to_string_lossy(), "FUSE link");
 
-        let old_paths = self.resolve_dual(&old_rel);
-        let target_dir = self.resolve_dual(&newparent_rel);
-        let new_io = target_dir.io.join(newname);
-        let new_display = target_dir.display.join(newname);
+        let old_io = self.resolve_io(&old_rel);
+        let new_io = self.create_io(&newparent, newname);
 
-        std::fs::hard_link(&old_paths.io, &new_io).map_err(Self::map_std_io_error)?;
+        std::fs::hard_link(&old_io, &new_io).map_err(Self::map_std_io_error)?;
         let attr = unix_fs::lookup(&new_io)?;
-        self.manifest
-            .write()
-            .add_entry_with_backend(&new_rel, new_display, false);
         Ok(self.with_ttl(attr))
     }
 
     fn unlink(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<()> {
-        let child_path = Self::join_child(&parent_id, name);
-        let child_rel = Self::to_rel_string(&child_path);
-        debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), path = %child_rel, "FUSE unlink");
+        debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), "FUSE unlink");
 
-        let resolved = self.resolve_dual(&child_rel);
-        unix_fs::unlink(&resolved.io)?;
-        self.manifest.write().remove_entry(&child_rel);
+        unix_fs::unlink(&self.resolve_child_io(&parent_id, name))?;
         Ok(())
     }
 
     fn rmdir(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<()> {
-        let child_path = Self::join_child(&parent_id, name);
-        let child_rel = Self::to_rel_string(&child_path);
         debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), "FUSE rmdir");
 
-        let resolved = self.resolve_dual(&child_rel);
-        unix_fs::rmdir(&resolved.io)?;
-        self.manifest.write().remove_entry(&child_rel);
+        unix_fs::rmdir(&self.resolve_child_io(&parent_id, name))?;
         Ok(())
     }
 
@@ -430,22 +410,19 @@ impl FuseHandler<PathBuf> for NueFs {
         let old_path = Self::join_child(&parent_id, name);
         let new_path = Self::join_child(&newparent, newname);
         let old_rel = Self::to_rel_string(&old_path);
-        let new_rel = Self::to_rel_string(&new_path);
-        let newparent_rel = Self::to_rel_string(&newparent);
         debug!(old = %Self::display_path(&old_path), new = %Self::display_path(&new_path), ?flags, "FUSE rename");
 
-        let old_paths = self.resolve_dual(&old_rel);
-        let target_dir = self.resolve_dual(&newparent_rel);
-        let new_io = target_dir.io.join(newname);
-        let new_display = target_dir.display.join(newname);
+        let manifest = self.manifest.read();
+        let old_io = manifest.resolve_io(&old_rel);
+        let new_io = if parent_id == newparent {
+            old_io.parent().unwrap_or(&old_io).join(newname)
+        } else {
+            let newparent_rel = Self::to_rel_string(&newparent);
+            manifest.resolve_io(&newparent_rel).join(newname)
+        };
+        drop(manifest);
 
-        unix_fs::rename(&old_paths.io, &new_io, flags)?;
-        self.manifest.write().rename_entry_with_backend(
-            &old_rel,
-            &new_rel,
-            &old_paths.display,
-            &new_display,
-        );
+        unix_fs::rename(&old_io, &new_io, flags)?;
         Ok(())
     }
 
@@ -458,10 +435,10 @@ impl FuseHandler<PathBuf> for NueFs {
         let rel_path = Self::to_rel_string(&file_id);
         debug!(path = %Self::display_path(&file_id), "FUSE setattr");
 
-        let resolved = self.resolve_dual(&rel_path);
-        Self::apply_setattr(&resolved.io, &request)?;
+        let io = self.resolve_io(&rel_path);
+        Self::apply_setattr(&io, &request)?;
 
-        let attr = unix_fs::lookup(&resolved.io)?;
+        let attr = unix_fs::lookup(&io)?;
         Ok(self.with_ttl(attr))
     }
 }

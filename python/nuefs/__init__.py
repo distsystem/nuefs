@@ -1,5 +1,6 @@
 """NueFS - FUSE-based layered filesystem for Python."""
 
+from nuefs._nuefs import MountRoot
 from nuefs.core import (
     DaemonInfo,
     Handle,
@@ -20,6 +21,7 @@ __all__ = [
     "ensure_external_gitdir",
     "Handle",
     "ManifestEntry",
+    "MountRoot",
     "open",
     "OwnerInfo",
     "shutdown",

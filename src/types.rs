@@ -10,6 +10,12 @@ pub struct ManifestEntry {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MountRoot {
+    pub virtual_prefix: String,
+    pub backend_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OwnerInfoWire {
     pub owner: String,
     pub backend_path: PathBuf,
@@ -30,12 +36,12 @@ pub struct DaemonInfo {
 
 #[tarpc::service]
 pub trait NuefsService {
-    async fn mount(root: PathBuf, entries: Vec<ManifestEntry>) -> Result<u64, String>;
+    async fn mount(root: PathBuf, entries: Vec<ManifestEntry>, mount_roots: Vec<MountRoot>) -> Result<u64, String>;
     async fn unmount(mount_id: u64) -> Result<(), String>;
     async fn which(mount_id: u64, path: String) -> Result<Option<OwnerInfoWire>, String>;
     async fn status() -> Vec<MountStatus>;
     async fn daemon_info() -> DaemonInfo;
-    async fn update(mount_id: u64, entries: Vec<ManifestEntry>) -> Result<(), String>;
+    async fn update(mount_id: u64, entries: Vec<ManifestEntry>, mount_roots: Vec<MountRoot>) -> Result<(), String>;
     async fn resolve(root: PathBuf) -> Option<u64>;
     async fn shutdown() -> Result<(), String>;
 }

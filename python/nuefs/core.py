@@ -26,9 +26,13 @@ class Handle:
         """Mount root path (read-only)."""
         return self._root
 
-    def update(self, entries: collections.abc.Sequence[ManifestEntry]) -> None:
+    def update(
+        self,
+        entries: collections.abc.Sequence[ManifestEntry],
+        mount_roots: collections.abc.Sequence[_ext.MountRoot] | None = None,
+    ) -> None:
         """Update the mount manifest."""
-        _ext._update(self._mount_id, list(entries))
+        _ext._update(self._mount_id, list(entries), list(mount_roots or []))
 
     def which(self, path: str) -> OwnerInfo | None:
         """Query which backend owns a path."""
@@ -62,7 +66,7 @@ def open(root: str | os.PathLike[str] | pathlib.Path) -> Handle:
     if mount_id is not None:
         return Handle(str(root_path), mount_id)
 
-    raw = _ext._mount(root_path, [])
+    raw = _ext._mount(root_path, [], [])
     return Handle(str(raw.root), raw.mount_id)
 
 

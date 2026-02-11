@@ -54,8 +54,13 @@ class Mount(BaseSettings):
 
         sources = list(manifest.resolve_mounts(root))
         entries: dict[str, nuefs.ManifestEntry] = {}
-        for _, resolved in sources:
+        mount_roots: list[nuefs.MountRoot] = []
+        for mount_entry, resolved in sources:
             entries.update(resolved)
+            source, prefix, _ = mount_entry._resolve_source(root)
+            mount_roots.append(
+                nuefs.MountRoot(virtual_prefix=prefix, backend_path=source)
+            )
 
         print_tree(root, sources, entries)
 
@@ -63,7 +68,7 @@ class Mount(BaseSettings):
             return
 
         with nuefs.open(root) as h:
-            h.update(list(entries.values()))
+            h.update(list(entries.values()), mount_roots)
             console.print(
                 Panel(
                     "Mount created, but your current shell is already inside the directory.\n"
