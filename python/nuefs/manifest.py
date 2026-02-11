@@ -148,8 +148,9 @@ class MountEntry(pydantic.BaseModel):
 
         items: list[tuple[pathlib.Path, str, bool]] = []
         for name, is_dir in seen.items():
-            if not self._is_excluded(name, is_dir=is_dir):
-                items.append((source / name, name, is_dir))
+            path = source / name
+            if path.exists() and not self._is_excluded(name, is_dir=is_dir):
+                items.append((path, name, is_dir))
         return items
 
     def _iter_entries(
