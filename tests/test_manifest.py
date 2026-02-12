@@ -232,8 +232,9 @@ mounts:
 """
         (tmp_path / "nue.yaml").write_text(yaml_content)
 
-        manifest = Manifest.load(config_path=tmp_path / "nue.yaml")
+        manifest, root = Manifest.load(path=tmp_path / "nue.yaml")
 
+        assert root == tmp_path
         assert manifest.apiVersion == "nue/v1"
         assert len(manifest.mounts) == 2
 
@@ -256,21 +257,21 @@ mounts:
 """
         (tmp_path / "nue.yaml").write_text(yaml_content)
 
-        manifest = Manifest.load(config_path=tmp_path / "nue.yaml")
+        manifest, _ = Manifest.load(path=tmp_path / "nue.yaml")
 
         assert len(manifest.mounts) == 2
 
     def test_load_nonexistent_manifest(self, tmp_path: pathlib.Path) -> None:
-        manifest = Manifest.load(config_path=tmp_path / "nue.yaml")
-        assert manifest.mounts == []
+        with pytest.raises(FileNotFoundError):
+            Manifest.load(path=tmp_path / "nue.yaml")
 
     def test_load_from_fixtures(self) -> None:
         fixtures = pathlib.Path(__file__).parent / "fixtures"
 
-        manifest = Manifest.load(config_path=fixtures / "nue.yaml")
+        manifest, _ = Manifest.load(path=fixtures / "nue.yaml")
         assert len(manifest.mounts) == 2
         assert manifest.mounts[0].source == "./sources/project-a/"
         assert len(manifest.mounts[0].exclude) == 3
 
-        multi = Manifest.load(config_path=fixtures / "nue-multi.yaml")
+        multi, _ = Manifest.load(path=fixtures / "nue-multi.yaml")
         assert len(multi.mounts) == 2
