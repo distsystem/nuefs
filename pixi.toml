@@ -8,6 +8,7 @@ version = "0.1.0"
 check = "cargo check"
 kill = "pkill -9 nuefsd || true"
 test = "pytest tests -v"
+posixtest = "python -m uposixtest"
 
 [dependencies]
 pytest = "*"
@@ -30,6 +31,7 @@ uv = "*"
 
 [pypi-dependencies]
 nuefs = { path = ".", editable = true }
+uposixtest = { path = "uposixtest", editable = true }
 
 [feature.build.activation.env]
 CONDA_BUILD = "1"
