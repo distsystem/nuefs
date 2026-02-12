@@ -37,13 +37,17 @@ def _lazy_unmount(root: pathlib.Path) -> None:
 
 
 class Mount(BaseSettings):
+    config: pathlib.Path = Field(
+        default=pathlib.Path("nue.yaml"),
+        validation_alias=AliasChoices("c", "config"),
+    )
     dry_run: bool = Field(
         default=False,
         validation_alias=AliasChoices("n", "dry_run"),
     )
 
     def run(self) -> None:
-        manifest, root = Manifest.load()
+        manifest, root = Manifest.load(path=self.config)
 
         if not self.dry_run:
             git_path = root / ".git"

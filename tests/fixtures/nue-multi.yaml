@@ -1,4 +1,0 @@
-apiVersion: nue/v1
-mounts:
-- source: ./sources/base/
-- source: ./sources/override/

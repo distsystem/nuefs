@@ -223,6 +223,8 @@ class Manifest(pydantic.BaseModel):
         cls, path: pathlib.Path = pathlib.Path("nue.yaml"),
     ) -> tuple[typing.Self, pathlib.Path]:
         resolved = path.expanduser().resolve()
+        if resolved.is_dir():
+            resolved = resolved / "nue.yaml"
         data = yaml.safe_load(resolved.read_text()) or {}
         return cls.model_validate(data), resolved.parent
 

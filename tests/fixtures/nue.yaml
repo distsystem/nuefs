@@ -1,9 +1,0 @@
-apiVersion: nue/v1
-mounts:
-- source: ./sources/project-a/
-  exclude:
-    - '*.pyc'
-    - __pycache__/
-    - .git/
-- source: ./sources/libs
-  dest: vendor
