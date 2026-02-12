@@ -2,71 +2,24 @@
 
 import pathlib
 
-import pytest
-
 import nuefs._nuefs as _ext
 from nuefs.manifest import Manifest, MountEntry, ensure_ancestors
-
-
-def _setup_dirs(tmp_path: pathlib.Path) -> pathlib.Path:
-    """Create test directory structure under tmp_path.
-
-    tmp_path/
-    ├── nue.yaml
-    ├── project-a/
-    │   ├── lib/
-    │   │   └── deep/
-    │   │       └── mod.py
-    │   ├── main.py
-    │   └── __pycache__/
-    │       └── main.cpython-312.pyc
-    └── libs/
-        ├── utils.py
-        └── helpers/
-            └── fmt.py
-    """
-    (tmp_path / "project-a" / "lib" / "deep").mkdir(parents=True)
-    (tmp_path / "project-a" / "lib" / "deep" / "mod.py").write_text("# mod")
-    (tmp_path / "project-a" / "main.py").write_text("# main")
-    (tmp_path / "project-a" / "__pycache__").mkdir()
-    (tmp_path / "project-a" / "__pycache__" / "main.cpython-312.pyc").write_bytes(b"\x00")
-
-    (tmp_path / "libs" / "helpers").mkdir(parents=True)
-    (tmp_path / "libs" / "utils.py").write_text("# utils")
-    (tmp_path / "libs" / "helpers" / "fmt.py").write_text("# fmt")
-
-    return tmp_path
 
 
 class TestEndToEndManifest:
     """Full pipeline: YAML → Manifest.load() → resolve_mounts() → ensure_ancestors()."""
 
-    def test_multi_mount_merge(self, tmp_path: pathlib.Path) -> None:
+    def test_multi_mount_merge(
+        self,
+        resolved_manifest: tuple[
+            pathlib.Path,
+            dict[str, _ext.ManifestEntry],
+            list[_ext.MountRoot],
+            list[tuple[MountEntry, dict[str, _ext.ManifestEntry]]],
+        ],
+    ) -> None:
         """Two trailing-slash sources merge into a single virtual namespace."""
-        root = _setup_dirs(tmp_path)
-        yaml_content = """\
-apiVersion: nue/v1
-mounts:
-- source: ./project-a/
-  exclude:
-    - __pycache__
-  vcs: false
-- source: ./libs/
-  dest: vendor
-  vcs: false
-"""
-        (root / "nue.yaml").write_text(yaml_content)
-
-        manifest, cfg_root = Manifest.load(path=root / "nue.yaml")
-        assert cfg_root == root
-
-        sources = list(manifest.resolve_mounts(root))
-        assert len(sources) == 2
-
-        entries: dict[str, _ext.ManifestEntry] = {}
-        for _, resolved in sources:
-            entries.update(resolved)
-        entries = ensure_ancestors(entries)
+        root, entries, _, _ = resolved_manifest
 
         # project-a contents (trailing slash → expand)
         assert "main.py" in entries
@@ -83,24 +36,20 @@ mounts:
         assert "vendor/helpers" in entries
         assert entries["vendor/helpers"].is_dir
 
-    def test_exclude_filtering(self, tmp_path: pathlib.Path) -> None:
+    def test_exclude_filtering(self, setup_dirs: pathlib.Path) -> None:
         """Excluded patterns are absent from resolved entries."""
-        root = _setup_dirs(tmp_path)
-
         entry = MountEntry(source="./project-a/", exclude=["__pycache__", "*.pyc"], vcs=False)
-        resolved = entry.resolve(root)
+        resolved = entry.resolve(setup_dirs)
 
         assert "main.py" in resolved
         for vpath in resolved:
             assert "__pycache__" not in vpath
             assert not vpath.endswith(".pyc")
 
-    def test_dest_prefix(self, tmp_path: pathlib.Path) -> None:
+    def test_dest_prefix(self, setup_dirs: pathlib.Path) -> None:
         """dest: vendor prepends prefix to all virtual paths."""
-        root = _setup_dirs(tmp_path)
-
         entry = MountEntry(source="./libs/", dest="vendor", exclude=[], vcs=False)
-        resolved = entry.resolve(root)
+        resolved = entry.resolve(setup_dirs)
 
         for vpath in resolved:
             assert vpath.startswith("vendor/"), f"{vpath} missing vendor/ prefix"
@@ -108,12 +57,10 @@ mounts:
         assert "vendor/utils.py" in resolved
         assert "vendor/helpers" in resolved
 
-    def test_single_child_chain_collapse(self, tmp_path: pathlib.Path) -> None:
+    def test_single_child_chain_collapse(self, setup_dirs: pathlib.Path) -> None:
         """lib/deep/ (single-child chain) collapses to lib/deep as dir entry."""
-        root = _setup_dirs(tmp_path)
-
         entry = MountEntry(source="./project-a/", exclude=["__pycache__"], vcs=False)
-        resolved = entry.resolve(root)
+        resolved = entry.resolve(setup_dirs)
 
         # lib → deep is a single-child chain, collapsed to lib/deep
         assert "lib/deep" in resolved
@@ -121,12 +68,10 @@ mounts:
         # intermediate "lib" should NOT appear (collapsed)
         assert "lib" not in resolved
 
-    def test_ensure_ancestors_fills_gaps(self, tmp_path: pathlib.Path) -> None:
+    def test_ensure_ancestors_fills_gaps(self, setup_dirs: pathlib.Path) -> None:
         """ensure_ancestors adds missing ancestor dirs after collapse."""
-        root = _setup_dirs(tmp_path)
-
         entry = MountEntry(source="./project-a/", exclude=["__pycache__"], vcs=False)
-        resolved = entry.resolve(root)
+        resolved = entry.resolve(setup_dirs)
 
         # Before: "lib" is missing because of collapse
         assert "lib" not in resolved
@@ -136,7 +81,7 @@ mounts:
         # After: "lib" ancestor is filled in
         assert "lib" in filled
         assert filled["lib"].is_dir
-        assert filled["lib"].backend_path == root / "project-a" / "lib"
+        assert filled["lib"].backend_path == setup_dirs / "project-a" / "lib"
 
     def test_mount_override(self, tmp_path: pathlib.Path) -> None:
         """Later mount overrides earlier mount for same virtual path."""
@@ -168,12 +113,10 @@ mounts:
         # override wins (dict.update with later mount)
         assert entries["config.py"].backend_path == root / "override" / "config.py"
 
-    def test_backend_paths_are_absolute(self, tmp_path: pathlib.Path) -> None:
+    def test_backend_paths_are_absolute(self, setup_dirs: pathlib.Path) -> None:
         """All backend_path values must be absolute paths."""
-        root = _setup_dirs(tmp_path)
-
         entry = MountEntry(source="./project-a/", exclude=["__pycache__"], vcs=False)
-        resolved = entry.resolve(root)
+        resolved = entry.resolve(setup_dirs)
         filled = ensure_ancestors(resolved)
 
         for vpath, me in filled.items():
