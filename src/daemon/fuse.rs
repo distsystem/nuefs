@@ -78,10 +78,10 @@ impl NueFs {
         self.manifest.read().resolve_io(rel_path)
     }
 
-    fn resolve_child_io(&self, parent: &Path, name: &OsStr) -> PathBuf {
+    fn resolve_child_io_cascade(&self, parent: &Path, name: &OsStr) -> PathBuf {
         let child_path = Self::join_child(parent, name);
         let child_rel = Self::to_rel_string(&child_path);
-        self.manifest.read().resolve_io(&child_rel)
+        self.manifest.read().resolve_io_cascade(&child_rel)
     }
 
     fn create_io(&self, parent: &Path, name: &OsStr) -> PathBuf {
@@ -387,14 +387,14 @@ impl FuseHandler<PathBuf> for NueFs {
     fn unlink(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<()> {
         debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), "FUSE unlink");
 
-        unix_fs::unlink(&self.resolve_child_io(&parent_id, name))?;
+        unix_fs::unlink(&self.resolve_child_io_cascade(&parent_id, name))?;
         Ok(())
     }
 
     fn rmdir(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<()> {
         debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), "FUSE rmdir");
 
-        unix_fs::rmdir(&self.resolve_child_io(&parent_id, name))?;
+        unix_fs::rmdir(&self.resolve_child_io_cascade(&parent_id, name))?;
         Ok(())
     }
 

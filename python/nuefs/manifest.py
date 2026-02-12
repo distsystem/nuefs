@@ -195,6 +195,23 @@ class MountEntry(pydantic.BaseModel):
             yield vpath, path, is_dir
 
 
+def ensure_ancestors(
+    entries: dict[str, _ext.ManifestEntry],
+) -> dict[str, _ext.ManifestEntry]:
+    """Fill in missing ancestor directory entries produced by _collapse_chain."""
+    for vpath, entry in list(entries.items()):
+        parts = vpath.split("/")
+        backend = entry.backend_path
+        for depth in range(len(parts) - 1, 0, -1):
+            ancestor = "/".join(parts[:depth])
+            backend = backend.parent
+            if ancestor not in entries:
+                entries[ancestor] = _ext.ManifestEntry(
+                    virtual_path=ancestor, backend_path=backend, is_dir=True,
+                )
+    return entries
+
+
 class Manifest(pydantic.BaseModel):
     """NueFS manifest (nue.yaml)."""
 

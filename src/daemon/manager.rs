@@ -368,7 +368,7 @@ impl Manifest {
         None
     }
 
-    pub(crate) fn resolve_paths(&self, path: &str) -> DualPath {
+    fn resolve_paths_inner(&self, path: &str, cascade: bool) -> DualPath {
         let path = path.trim_start_matches('/');
 
         // 1. origins (exact match + dir prefix)
@@ -379,7 +379,7 @@ impl Manifest {
             };
         }
 
-        // 2. mount_roots scan: first existing path wins
+        // 2. mount_roots scan
         for mr in &self.mount_roots {
             if let Some(suffix) = strip_mount_prefix(path, &mr.virtual_prefix) {
                 let io_candidate = mr.io_backend.join(suffix);
@@ -388,6 +388,9 @@ impl Manifest {
                         display: mr.display_backend.join(suffix),
                         io: io_candidate,
                     };
+                }
+                if !cascade {
+                    break;
                 }
             }
         }
@@ -400,8 +403,16 @@ impl Manifest {
         }
     }
 
+    pub(crate) fn resolve_paths(&self, path: &str) -> DualPath {
+        self.resolve_paths_inner(path, false)
+    }
+
     pub(crate) fn resolve_io(&self, path: &str) -> PathBuf {
         self.resolve_paths(path).io
+    }
+
+    pub(crate) fn resolve_io_cascade(&self, path: &str) -> PathBuf {
+        self.resolve_paths_inner(path, true).io
     }
 
     pub(crate) fn create_target_io(&self, parent_path: &str, child_name: &str) -> PathBuf {
@@ -451,13 +462,14 @@ impl Manifest {
             }
         }
 
-        // mount_roots matching this prefix
+        // mount_roots: only first matching prefix (avoid leaking excluded dirs)
         for mr in &self.mount_roots {
             if let Some(suffix) = strip_mount_prefix(prefix, &mr.virtual_prefix) {
                 let candidate = mr.io_backend.join(suffix);
                 if candidate.is_dir() {
                     io_dirs.push(candidate);
                 }
+                break;
             }
         }
 
@@ -673,12 +685,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_paths_scans_mount_roots() {
+    fn resolve_paths_uses_first_mount_root_only() {
         let root = make_tmp_dir();
         std::fs::create_dir_all(&root).unwrap();
         let root = root.canonicalize().unwrap();
 
-        // Create backend dirs with files
         let backend_a = root.join("_backend_a");
         let backend_b = root.join("_backend_b");
         std::fs::create_dir_all(&backend_a).unwrap();
@@ -702,15 +713,19 @@ mod tests {
 
         let manifest = Manifest::from_entries(root.clone(), raw_fd, vec![], mount_roots);
 
-        // a.txt exists in backend_a → first mount root wins
+        // a.txt exists in backend_a (first mount root) → found
         let p = manifest.resolve_paths("a.txt");
         assert_eq!(p.io, procfd_root(raw_fd).join("_backend_a/a.txt"));
 
-        // b.txt only exists in backend_b → second mount root
+        // b.txt only in backend_b → not found via resolve_paths (no cascade)
         let p = manifest.resolve_paths("b.txt");
-        assert_eq!(p.io, procfd_root(raw_fd).join("_backend_b/b.txt"));
+        assert_eq!(p.io, procfd_root(raw_fd).join("b.txt"));
 
-        // nonexistent → fallback to display_root
+        // b.txt found via cascade (for delete operations)
+        let io = manifest.resolve_io_cascade("b.txt");
+        assert_eq!(io, procfd_root(raw_fd).join("_backend_b/b.txt"));
+
+        // nonexistent → fallback
         let p = manifest.resolve_paths("missing.txt");
         assert_eq!(p.display, root.join("missing.txt"));
 
@@ -719,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn readdir_plan_merges_multiple_backends() {
+    fn readdir_plan_uses_first_mount_root_only() {
         let root = make_tmp_dir();
         std::fs::create_dir_all(&root).unwrap();
         let root = root.canonicalize().unwrap();
@@ -750,7 +765,8 @@ mod tests {
         let manifest = Manifest::from_entries(root.clone(), raw_fd, vec![], mount_roots);
         let plan = manifest.readdir_plan("");
 
-        assert_eq!(plan.io_dirs.len(), 2);
+        // Only first matching mount_root is used (no cascade for readdir)
+        assert_eq!(plan.io_dirs.len(), 1);
         assert_eq!(plan.origin_children.len(), 0);
 
         drop(root_fd);

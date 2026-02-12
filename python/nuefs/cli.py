@@ -14,7 +14,7 @@ import nuefs
 console = rich.get_console()
 
 from . import gitdir as gitdir_mod
-from .manifest import Manifest, print_tree
+from .manifest import Manifest, ensure_ancestors, print_tree
 
 
 def _lazy_unmount(root: pathlib.Path) -> None:
@@ -55,17 +55,26 @@ class Mount(BaseSettings):
         sources = list(manifest.resolve_mounts(root))
         entries: dict[str, nuefs.ManifestEntry] = {}
         mount_roots: list[nuefs.MountRoot] = []
+        external_vpaths: set[str] = set()
         for mount_entry, resolved in sources:
             entries.update(resolved)
             source, prefix, _ = mount_entry._resolve_source(root)
             mount_roots.append(
                 nuefs.MountRoot(virtual_prefix=prefix, backend_path=source)
             )
+            if source != root:
+                for vpath in resolved:
+                    external_vpaths.add(vpath.split("/", 1)[0])
+
+        entries = ensure_ancestors(entries)
 
         print_tree(root, sources, entries)
 
         if self.dry_run:
             return
+
+        if external_vpaths:
+            gitdir_mod.sync_git_exclude(root, external_vpaths)
 
         with nuefs.open(root) as h:
             h.update(list(entries.values()), mount_roots)
