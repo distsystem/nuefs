@@ -216,10 +216,17 @@ impl FuseHandler<PathBuf> for NueFs {
         &self,
         _req: &RequestInfo,
         file_id: PathBuf,
-        _file_handle: Option<BorrowedFileHandle<'_>>,
+        file_handle: Option<BorrowedFileHandle<'_>>,
     ) -> FuseResult<FileAttribute> {
         let rel = Self::to_rel_string(&file_id);
         debug!(path = %Self::display_path(&file_id), "FUSE getattr");
+
+        if let Some(fh) = file_handle {
+            if let Ok(attr) = unix_fs::getattr(fh.as_borrowed_fd()) {
+                return Ok(self.with_ttl(attr));
+            }
+        }
+
         self.get_file_attr(&rel)
             .map_err(|_| Self::file_not_found(&file_id))
     }
