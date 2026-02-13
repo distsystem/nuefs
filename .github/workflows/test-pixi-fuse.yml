@@ -53,3 +53,17 @@ jobs:
       - name: Verify meta works
         working-directory: ../mundi
         run: pixi run meta --help
+
+      - name: Setup Tailscale
+        if: failure()
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ env.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ env.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Start SSH and wait for debug
+        if: failure()
+        run: |
+          echo runner:ci-debug | sudo chpasswd
+          sudo systemctl start ssh
+          echo "::notice::SSH into runner: ssh runner@$(tailscale ip -4) (password: ci-debug)" && sleep 18000
