@@ -46,10 +46,6 @@ impl NueFs {
         }
     }
 
-    fn parent_path(path: &Path) -> PathBuf {
-        path.parent().map_or_else(PathBuf::new, Path::to_path_buf)
-    }
-
     fn with_ttl(&self, mut attr: FileAttribute) -> FileAttribute {
         if attr.ttl.is_none() {
             attr.ttl = Some(self.get_default_ttl());
@@ -254,51 +250,6 @@ impl FuseHandler<PathBuf> for NueFs {
                 FileKind::RegularFile
             };
             entries.push((OsString::from(name), kind));
-        }
-
-        Ok(entries)
-    }
-
-    fn readdirplus(
-        &self,
-        _req: &RequestInfo,
-        file_id: PathBuf,
-        _file_handle: BorrowedFileHandle<'_>,
-    ) -> FuseResult<Vec<(OsString, FileAttribute)>> {
-        let rel_path = Self::to_rel_string(&file_id);
-        let parent_rel = Self::to_rel_string(&Self::parent_path(&file_id));
-        debug!(path = %Self::display_path(&file_id), "FUSE readdirplus");
-
-        let manifest = self.manifest.read();
-        let plan = manifest.readdir_plan(&rel_path);
-        let dot_io = manifest.resolve_io(&rel_path);
-        let dotdot_io = manifest.resolve_io(&parent_rel);
-
-        let children = Self::merge_multi_dir_children(&plan.io_dirs, plan.origin_children);
-
-        let child_ios: Vec<(String, PathBuf)> = children
-            .into_iter()
-            .map(|(name, _)| {
-                let child_rel =
-                    Self::to_rel_string(&Self::join_child(&file_id, OsStr::new(&name)));
-                let io = manifest.resolve_io(&child_rel);
-                (name, io)
-            })
-            .collect();
-        drop(manifest);
-
-        let mut entries: Vec<(OsString, FileAttribute)> = Vec::new();
-
-        if let Ok(attr) = unix_fs::lookup(&dot_io).map(|a| self.with_ttl(a)) {
-            entries.push((".".into(), attr));
-        }
-        if let Ok(attr) = unix_fs::lookup(&dotdot_io).map(|a| self.with_ttl(a)) {
-            entries.push(("..".into(), attr));
-        }
-        for (name, io) in child_ios {
-            if let Ok(attr) = unix_fs::lookup(&io).map(|a| self.with_ttl(a)) {
-                entries.push((OsString::from(name), attr));
-            }
         }
 
         Ok(entries)
