@@ -28,7 +28,7 @@ jobs:
         with:
           pixi-version: v0.63.2
           pixi-url: https://github.com/fecet/pixi/releases/download/{{version}}/{{pixiFile}}
-          environments: |
+          environments: >-
             default
             build
 
