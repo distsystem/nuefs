@@ -1,0 +1,42 @@
+package:
+  name: nuefs
+  version: 0.1.0
+
+source:
+  path: .
+  use_gitignore: true
+
+build:
+  number: 0
+  script: |
+    # Build Python extension via maturin
+    maturin build --release --interpreter $PYTHON
+    $PYTHON -m pip install target/wheels/*.whl --no-deps --no-build-isolation
+
+    # Build and install nuefsd binary
+    cargo install --locked --root "$PREFIX" --path . --bin nuefsd --target-dir target --no-track --force
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ${{ compiler('rust') }}
+    - cargo-bundle-licenses
+
+  host:
+    - python =3.12
+    - maturin >=1.0,<2.0
+    - pip
+    - libfuse3
+
+  run:
+    - python >=3.12
+    - pydantic-settings >=2.0
+    - pyyaml
+    - rich >=13.0
+    - pathspec
+    - pygit2
+
+tests:
+  - script:
+      - nue --help
+      - python -c "import nuefs"
