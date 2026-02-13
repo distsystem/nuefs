@@ -28,9 +28,12 @@ jobs:
         with:
           pixi-version: v0.63.2
           pixi-url: https://github.com/fecet/pixi/releases/download/{{version}}/{{pixiFile}}
+          environments: |
+            default
+            build
 
       - name: Build nuefs
-        run: pixi run -e build develop
+        run: pixi run develop
 
       - name: Checkout mundi
         run: gh repo clone distsystem/mundi ../mundi -- --depth 1
@@ -41,7 +44,7 @@ jobs:
       - name: Mount workspace
         run: |
           sudo apt-get install -y -qq fuse3 > /dev/null
-          cd ../mundi && nue mount
+          pixi run nue mount -c ../mundi/nue.yaml
 
       - name: Setup mundi project
         working-directory: ../mundi
@@ -54,16 +57,16 @@ jobs:
         working-directory: ../mundi
         run: pixi run meta --help
 
-      - name: Setup Tailscale
-        if: failure()
-        uses: tailscale/github-action@v3
-        with:
-          oauth-client-id: ${{ env.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ env.TS_OAUTH_SECRET }}
-          tags: tag:ci
-      - name: Start SSH and wait for debug
-        if: failure()
-        run: |
-          echo runner:ci-debug | sudo chpasswd
-          sudo systemctl start ssh
-          echo "::notice::SSH into runner: ssh runner@$(tailscale ip -4) (password: ci-debug)" && sleep 18000
+      # - name: Setup Tailscale
+      #   if: failure()
+      #   uses: tailscale/github-action@v3
+      #   with:
+      #     oauth-client-id: ${{ env.TS_OAUTH_CLIENT_ID }}
+      #     oauth-secret: ${{ env.TS_OAUTH_SECRET }}
+      #     tags: tag:ci
+      # - name: Start SSH and wait for debug
+      #   if: failure()
+      #   run: |
+      #     echo runner:ci-debug | sudo chpasswd
+      #     sudo systemctl start ssh
+      #     echo "::notice::SSH into runner: ssh runner@$(tailscale ip -4) (password: ci-debug)" && sleep 18000
