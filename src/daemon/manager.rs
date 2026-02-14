@@ -4,8 +4,9 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use easy_fuser::prelude::BackgroundSession;
-use easy_fuser::prelude::MountOption;
+use std::ffi::OsStr;
+
+use fuser::BackgroundSession;
 use parking_lot::RwLock;
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
@@ -82,11 +83,12 @@ impl Manager {
         )));
         let fs = NueFs::new(manifest.clone());
 
-        let options = vec![MountOption::FSName("nuefs".to_string())];
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let session = easy_fuser::spawn_mount::<PathBuf, _, _>(fs, &root, &options, threads)?;
+        let fuse = fuse_mt::FuseMT::new(fs, threads);
+        let options: &[&OsStr] = &[OsStr::new("fsname=nuefs")];
+        let session = fuse_mt::spawn_mount(fuse, &root, options)?;
 
         let notifier = Arc::new(RwLock::new(Some(session.notifier())));
 
