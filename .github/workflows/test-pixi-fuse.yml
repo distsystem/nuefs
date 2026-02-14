@@ -12,7 +12,24 @@ on:
   workflow_dispatch:
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          pixi-version: v0.63.2
+          pixi-url: https://github.com/fecet/pixi/releases/download/{{version}}/{{pixiFile}}
+          run-install: false
+      - name: Build nuefs package
+        run: pixi build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuefs-conda
+          path: output/
+
   test-mundi-install:
+    needs: build
     runs-on: ubuntu-latest
     env:
       PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
@@ -23,17 +40,22 @@ jobs:
         with:
           environment: distsystem-dev/mundi
 
-      - name: Install pixi
-        uses: prefix-dev/setup-pixi@v0.8.13
+      - uses: actions/download-artifact@v4
+        with:
+          name: nuefs-conda
+          path: output/
+
+      - name: Resolve conda package path
+        id: pkg
+        run: echo "path=$(ls output/linux-64/nuefs-*.conda)" >> "$GITHUB_OUTPUT"
+
+      - uses: prefix-dev/setup-pixi@v0.9.4
         with:
           pixi-version: v0.63.2
           pixi-url: https://github.com/fecet/pixi/releases/download/{{version}}/{{pixiFile}}
-          environments: >-
-            default
-            build
-
-      - name: Build nuefs
-        run: pixi run develop
+          run-install: false
+          global-environments: |
+            nuefs --path ${{ steps.pkg.outputs.path }}
 
       - name: Checkout mundi
         run: gh repo clone distsystem/mundi ../mundi -- --depth 1
@@ -44,7 +66,7 @@ jobs:
       - name: Mount workspace
         run: |
           sudo apt-get install -y -qq fuse3 > /dev/null
-          pixi run nue mount -c ../mundi/nue.yaml
+          nue mount -c ../mundi/nue.yaml
 
       - name: Setup mundi project
         working-directory: ../mundi
@@ -56,17 +78,3 @@ jobs:
       - name: Verify meta works
         working-directory: ../mundi
         run: pixi run meta --help
-
-      # - name: Setup Tailscale
-      #   if: failure()
-      #   uses: tailscale/github-action@v3
-      #   with:
-      #     oauth-client-id: ${{ env.TS_OAUTH_CLIENT_ID }}
-      #     oauth-secret: ${{ env.TS_OAUTH_SECRET }}
-      #     tags: tag:ci
-      # - name: Start SSH and wait for debug
-      #   if: failure()
-      #   run: |
-      #     echo runner:ci-debug | sudo chpasswd
-      #     sudo systemctl start ssh
-      #     echo "::notice::SSH into runner: ssh runner@$(tailscale ip -4) (password: ci-debug)" && sleep 18000
