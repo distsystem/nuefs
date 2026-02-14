@@ -47,7 +47,7 @@ jobs:
 
       - name: Resolve conda package path
         id: pkg
-        run: echo "path=$(ls output/linux-64/nuefs-*.conda)" >> "$GITHUB_OUTPUT"
+        run: echo "path=$(ls output/nuefs-*.conda)" >> "$GITHUB_OUTPUT"
 
       - uses: prefix-dev/setup-pixi@v0.9.4
         with:
