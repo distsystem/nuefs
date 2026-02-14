@@ -22,7 +22,7 @@ jobs:
           pixi-url: https://github.com/fecet/pixi/releases/download/{{version}}/{{pixiFile}}
           run-install: false
       - name: Build nuefs package
-        run: pixi build
+        run: pixi build -o output
       - uses: actions/upload-artifact@v4
         with:
           name: nuefs-conda
