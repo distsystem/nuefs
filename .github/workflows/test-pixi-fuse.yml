@@ -72,7 +72,6 @@ jobs:
         working-directory: ../mundi
         run: |
           git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
-          pixi config set detached-environments true
           pixi install --frozen
 
       - name: Verify meta works
