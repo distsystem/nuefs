@@ -79,3 +79,40 @@ jobs:
       - name: Verify meta works
         working-directory: ../mundi
         run: pixi run meta --help
+
+  test-mundi-rsync:
+    runs-on: ubuntu-latest
+    env:
+      PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pulumi/esc-action@v1
+        with:
+          environment: distsystem-dev/mundi
+
+      - uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          pixi-version: v0.63.2
+          pixi-url: https://github.com/fecet/pixi/releases/download/{{version}}/{{pixiFile}}
+          run-install: false
+
+      - name: Checkout mundi
+        run: gh repo clone distsystem/mundi ../mundi -- --depth 1
+
+      - name: Clone meta-forge
+        run: gh repo clone distsystem/meta-forge ../meta-forge -- --depth 1
+
+      - name: Merge workspace via rsync
+        run: rsync -a --exclude='pixi*' --exclude='.github' --exclude='.gitignore' --exclude='.gitattributes' ../meta-forge/ ../mundi/
+
+      - name: Setup mundi project
+        working-directory: ../mundi
+        run: |
+          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+          rm pixi.lock
+          pixi install
+
+      - name: Verify meta works
+        working-directory: ../mundi
+        run: pixi run meta --help
