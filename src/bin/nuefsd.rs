@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::path::PathBuf;
 
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 fn default_log_path() -> String {
@@ -64,6 +64,41 @@ async fn main() {
             .with_ansi(false)
             .init();
     }
+
+    // Catch panics from FUSE handler threads and log them
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("<unnamed>");
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+        // Write to a dedicated file to bypass tracing (which may not flush)
+        use std::io::Write;
+        let msg = format!(
+            "PANIC thread={name} location={location} message={payload}\n"
+        );
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/nuefs-panic.log")
+        {
+            let _ = f.write_all(msg.as_bytes());
+        }
+        error!(
+            thread = name,
+            location = location,
+            message = payload,
+            "PANIC in thread"
+        );
+    }));
 
     let socket = socket.unwrap_or_else(_nuefs::runtime::default_socket_path);
     info!(socket = %socket.display(), pid = std::process::id(), log = %log_path, "nuefsd starting");

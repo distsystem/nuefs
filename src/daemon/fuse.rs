@@ -46,9 +46,15 @@ impl NueFs {
         }
     }
 
-    fn with_ttl(&self, mut attr: FileAttribute) -> FileAttribute {
+    fn with_defaults(&self, mut attr: FileAttribute) -> FileAttribute {
         if attr.ttl.is_none() {
             attr.ttl = Some(self.get_default_ttl());
+        }
+        // Stable generation prevents kernel EIO from mismatched generation numbers.
+        // easy_fuser's default (random nanosecond timestamp) changes on every LOOKUP,
+        // which the kernel interprets as inode recycling.
+        if attr.generation.is_none() {
+            attr.generation = Some(1);
         }
         attr
     }
@@ -95,7 +101,7 @@ impl NueFs {
 
     fn get_file_attr(&self, rel_path: &str) -> FuseResult<FileAttribute> {
         let io = self.resolve_io(rel_path);
-        unix_fs::lookup(&io).map(|a| self.with_ttl(a))
+        unix_fs::lookup(&io).map(|a| self.with_defaults(a))
     }
 
     fn read_dir_children(path: &Path) -> Vec<(String, bool)> {
@@ -195,6 +201,10 @@ impl FuseHandler<PathBuf> for NueFs {
         &self.inner
     }
 
+    fn get_default_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(1)
+    }
+
     fn lookup(
         &self,
         _req: &RequestInfo,
@@ -221,7 +231,7 @@ impl FuseHandler<PathBuf> for NueFs {
 
         if let Some(fh) = file_handle {
             if let Ok(attr) = unix_fs::getattr(fh.as_borrowed_fd()) {
-                return Ok(self.with_ttl(attr));
+                return Ok(self.with_defaults(attr));
             }
         }
 
@@ -241,6 +251,7 @@ impl FuseHandler<PathBuf> for NueFs {
         let plan = self.manifest.read().readdir_plan(&rel_path);
         let children = Self::merge_multi_dir_children(&plan.io_dirs, plan.origin_children);
 
+        debug!(path = %Self::display_path(&file_id), io_dirs = ?plan.io_dirs, children = children.len(), "FUSE readdir plan");
         let mut entries: Vec<(OsString, FileKind)> = Vec::with_capacity(children.len() + 2);
         entries.push((".".into(), FileKind::Directory));
         entries.push(("..".into(), FileKind::Directory));
@@ -284,16 +295,16 @@ impl FuseHandler<PathBuf> for NueFs {
         umask: u32,
         flags: OpenFlags,
     ) -> FuseResult<(OwnedFileHandle, FileAttribute, FUSEOpenResponseFlags)> {
-        debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), mode, "FUSE create");
-
         let io_path = self.create_io(&parent_id, name);
+        debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), io = %io_path.display(), mode, "FUSE create");
+
         let (fd, attr) = unix_fs::create(&io_path, mode, umask, flags | OpenFlags::CLOSE_ON_EXEC).map_err(|e| {
             error!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), io = %io_path.display(), error = %e, "FUSE create failed");
             e
         })?;
         let handle = OwnedFileHandle::from_owned_fd(fd).ok_or_else(Self::bad_file_handle)?;
 
-        Ok((handle, self.with_ttl(attr), FUSEOpenResponseFlags::empty()))
+        Ok((handle, self.with_defaults(attr), FUSEOpenResponseFlags::empty()))
     }
 
     fn mkdir(
@@ -304,14 +315,15 @@ impl FuseHandler<PathBuf> for NueFs {
         mode: u32,
         umask: u32,
     ) -> FuseResult<FileAttribute> {
-        debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), mode, "FUSE mkdir");
-
         let io_path = self.create_io(&parent_id, name);
+        debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), io = %io_path.display(), mode, "FUSE mkdir");
+
         let attr = unix_fs::mkdir(&io_path, mode, umask).map_err(|e| {
             error!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), io = %io_path.display(), error = %e, "FUSE mkdir failed");
             e
         })?;
-        Ok(self.with_ttl(attr))
+        debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), "FUSE mkdir OK");
+        Ok(self.with_defaults(attr))
     }
 
     fn readlink(&self, _req: &RequestInfo, file_id: PathBuf) -> FuseResult<Vec<u8>> {
@@ -332,7 +344,7 @@ impl FuseHandler<PathBuf> for NueFs {
 
         let io_path = self.create_io(&parent_id, link_name);
         let attr = unix_fs::symlink(&io_path, target)?;
-        Ok(self.with_ttl(attr))
+        Ok(self.with_defaults(attr))
     }
 
     fn link(
@@ -353,7 +365,7 @@ impl FuseHandler<PathBuf> for NueFs {
             Self::map_std_io_error(e)
         })?;
         let attr = unix_fs::lookup(&new_io)?;
-        Ok(self.with_ttl(attr))
+        Ok(self.with_defaults(attr))
     }
 
     fn unlink(&self, _req: &RequestInfo, parent_id: PathBuf, name: &OsStr) -> FuseResult<()> {
@@ -414,6 +426,6 @@ impl FuseHandler<PathBuf> for NueFs {
         })?;
 
         let attr = unix_fs::lookup(&io)?;
-        Ok(self.with_ttl(attr))
+        Ok(self.with_defaults(attr))
     }
 }
