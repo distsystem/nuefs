@@ -9,7 +9,7 @@ use easy_fuser::types::errors::{ErrorKind, PosixError};
 use easy_fuser::unix_fs;
 use parking_lot::RwLock;
 use rustix::fd::OwnedFd;
-use tracing::debug;
+use tracing::{debug, error, warn};
 
 use super::manager::Manifest;
 
@@ -62,12 +62,16 @@ impl NueFs {
     }
 
     fn map_std_io_error(e: std::io::Error) -> PosixError {
-        let kind = match e.kind() {
-            std::io::ErrorKind::NotFound => ErrorKind::FileNotFound,
-            std::io::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
-            _ => ErrorKind::InputOutputError,
-        };
-        PosixError::new(kind, e.to_string())
+        if let Some(raw) = e.raw_os_error() {
+            PosixError::new(ErrorKind::from(raw), e.to_string())
+        } else {
+            let kind = match e.kind() {
+                std::io::ErrorKind::NotFound => ErrorKind::FileNotFound,
+                std::io::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
+                _ => ErrorKind::InputOutputError,
+            };
+            PosixError::new(kind, e.to_string())
+        }
     }
 
     fn resolve_io(&self, rel_path: &str) -> PathBuf {
@@ -137,11 +141,7 @@ impl NueFs {
 
     fn map_rustix_error(e: rustix::io::Errno, context: &str) -> PosixError {
         PosixError::new(
-            match e {
-                rustix::io::Errno::NOENT => ErrorKind::FileNotFound,
-                rustix::io::Errno::ACCESS | rustix::io::Errno::PERM => ErrorKind::PermissionDenied,
-                _ => ErrorKind::InputOutputError,
-            },
+            ErrorKind::from(e.raw_os_error()),
             format!("{context}: {e}"),
         )
     }
@@ -204,8 +204,10 @@ impl FuseHandler<PathBuf> for NueFs {
         let child_path = Self::join_child(&parent_id, name);
         let child_rel = Self::to_rel_string(&child_path);
         debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), path = %child_rel, "FUSE lookup");
-        self.get_file_attr(&child_rel)
-            .map_err(|_| Self::file_not_found(&child_path))
+        self.get_file_attr(&child_rel).map_err(|e| {
+            debug!(path = %child_rel, error = %e, "lookup failed");
+            Self::file_not_found(&child_path)
+        })
     }
 
     fn getattr(
@@ -265,7 +267,10 @@ impl FuseHandler<PathBuf> for NueFs {
         debug!(path = %Self::display_path(&file_id), ?flags, "FUSE open");
 
         let io = self.resolve_io(&rel_path);
-        let fd = unix_fs::open(&io, flags | OpenFlags::CLOSE_ON_EXEC)?;
+        let fd = unix_fs::open(&io, flags | OpenFlags::CLOSE_ON_EXEC).map_err(|e| {
+            warn!(path = %Self::display_path(&file_id), io = %io.display(), ?flags, error = %e, "FUSE open failed");
+            e
+        })?;
         let handle = OwnedFileHandle::from_owned_fd(fd).ok_or_else(Self::bad_file_handle)?;
         Ok((handle, FUSEOpenResponseFlags::empty()))
     }
@@ -282,7 +287,10 @@ impl FuseHandler<PathBuf> for NueFs {
         debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), mode, "FUSE create");
 
         let io_path = self.create_io(&parent_id, name);
-        let (fd, attr) = unix_fs::create(&io_path, mode, umask, flags | OpenFlags::CLOSE_ON_EXEC)?;
+        let (fd, attr) = unix_fs::create(&io_path, mode, umask, flags | OpenFlags::CLOSE_ON_EXEC).map_err(|e| {
+            error!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), io = %io_path.display(), error = %e, "FUSE create failed");
+            e
+        })?;
         let handle = OwnedFileHandle::from_owned_fd(fd).ok_or_else(Self::bad_file_handle)?;
 
         Ok((handle, self.with_ttl(attr), FUSEOpenResponseFlags::empty()))
@@ -299,7 +307,10 @@ impl FuseHandler<PathBuf> for NueFs {
         debug!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), mode, "FUSE mkdir");
 
         let io_path = self.create_io(&parent_id, name);
-        let attr = unix_fs::mkdir(&io_path, mode, umask)?;
+        let attr = unix_fs::mkdir(&io_path, mode, umask).map_err(|e| {
+            error!(parent = %Self::display_path(&parent_id), name = %name.to_string_lossy(), io = %io_path.display(), error = %e, "FUSE mkdir failed");
+            e
+        })?;
         Ok(self.with_ttl(attr))
     }
 
@@ -337,7 +348,10 @@ impl FuseHandler<PathBuf> for NueFs {
         let old_io = self.resolve_io(&old_rel);
         let new_io = self.create_io(&newparent, newname);
 
-        std::fs::hard_link(&old_io, &new_io).map_err(Self::map_std_io_error)?;
+        std::fs::hard_link(&old_io, &new_io).map_err(|e| {
+            warn!(old = %old_io.display(), new = %new_io.display(), error = %e, "FUSE link failed");
+            Self::map_std_io_error(e)
+        })?;
         let attr = unix_fs::lookup(&new_io)?;
         Ok(self.with_ttl(attr))
     }
@@ -394,7 +408,10 @@ impl FuseHandler<PathBuf> for NueFs {
         debug!(path = %Self::display_path(&file_id), "FUSE setattr");
 
         let io = self.resolve_io(&rel_path);
-        Self::apply_setattr(&io, &request)?;
+        Self::apply_setattr(&io, &request).map_err(|e| {
+            warn!(path = %Self::display_path(&file_id), io = %io.display(), error = %e, "FUSE setattr failed");
+            e
+        })?;
 
         let attr = unix_fs::lookup(&io)?;
         Ok(self.with_ttl(attr))
