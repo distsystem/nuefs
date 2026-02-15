@@ -2,7 +2,6 @@
 channels = ["https://repo.prefix.dev/meta-forge", "conda-forge"]
 name = "nuefs"
 platforms = ["linux-64"]
-version = "0.1.0"
 preview = ["pixi-build"]
 
 [package]
@@ -12,10 +11,19 @@ version = "0.1.0"
 [package.build.backend]
 name = "pixi-build-rattler-build"
 version = "*"
-channels = [
-  "https://prefix.dev/pixi-build-backends",
-  "https://prefix.dev/conda-forge",
-]
+channels = ["https://prefix.dev/pixi-build-backends", "conda-forge"]
+
+[feature.proto.dependencies]
+buf = "*"
+ruff = "~=0.9.3"
+grpcio = "*"
+betterproto2 = "*"
+
+[feature.proto.pypi-dependencies]
+betterproto2-compiler = ">=0.9.0"
+
+[environments]
+proto = { features = ["proto"], no-default-feature = true }
 
 [tasks]
 check = "cargo check"
@@ -24,11 +32,12 @@ stop = "nue stop 2>/dev/null || pkill -9 nuefsd || true"
 test = "pytest tests -v"
 bench = "python -m tests.bench_fio"
 posixtest = "python -m uposixtest"
+protogen = "buf generate proto"
 
 [dependencies]
 nuefs = { path = "." }
+nuefsd = { path = "nuefsd" }
 pytest = "*"
-rust = "*"
 python = "=3.12"
 humanize = "*"
 packageurl-python = "*"

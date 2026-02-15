@@ -34,14 +34,70 @@ pub struct DaemonInfo {
     pub started_at: u64,
 }
 
-#[tarpc::service]
-pub trait NuefsService {
-    async fn mount(root: PathBuf, entries: Vec<ManifestEntry>, mount_roots: Vec<MountRoot>) -> Result<u64, String>;
-    async fn unmount(mount_id: u64) -> Result<(), String>;
-    async fn which(mount_id: u64, path: String) -> Result<Option<OwnerInfoWire>, String>;
-    async fn status() -> Vec<MountStatus>;
-    async fn daemon_info() -> DaemonInfo;
-    async fn update(mount_id: u64, entries: Vec<ManifestEntry>, mount_roots: Vec<MountRoot>) -> Result<(), String>;
-    async fn resolve(root: PathBuf) -> Option<u64>;
-    async fn shutdown() -> Result<(), String>;
+// Proto → internal type conversions
+
+impl From<crate::proto::ManifestEntry> for ManifestEntry {
+    fn from(p: crate::proto::ManifestEntry) -> Self {
+        Self {
+            virtual_path: p.virtual_path,
+            backend_path: PathBuf::from(p.backend_path),
+            is_dir: p.is_dir,
+        }
+    }
+}
+
+impl From<&ManifestEntry> for crate::proto::ManifestEntry {
+    fn from(m: &ManifestEntry) -> Self {
+        Self {
+            virtual_path: m.virtual_path.clone(),
+            backend_path: m.backend_path.to_string_lossy().into(),
+            is_dir: m.is_dir,
+        }
+    }
+}
+
+impl From<crate::proto::MountRoot> for MountRoot {
+    fn from(p: crate::proto::MountRoot) -> Self {
+        Self {
+            virtual_prefix: p.virtual_prefix,
+            backend_path: PathBuf::from(p.backend_path),
+        }
+    }
+}
+
+impl From<&MountRoot> for crate::proto::MountRoot {
+    fn from(m: &MountRoot) -> Self {
+        Self {
+            virtual_prefix: m.virtual_prefix.clone(),
+            backend_path: m.backend_path.to_string_lossy().into(),
+        }
+    }
+}
+
+impl From<&OwnerInfoWire> for crate::proto::OwnerInfo {
+    fn from(o: &OwnerInfoWire) -> Self {
+        Self {
+            owner: o.owner.clone(),
+            backend_path: o.backend_path.to_string_lossy().into(),
+        }
+    }
+}
+
+impl From<&MountStatus> for crate::proto::MountStatus {
+    fn from(m: &MountStatus) -> Self {
+        Self {
+            mount_id: m.mount_id,
+            root: m.root.to_string_lossy().into(),
+        }
+    }
+}
+
+impl From<&DaemonInfo> for crate::proto::DaemonInfo {
+    fn from(d: &DaemonInfo) -> Self {
+        Self {
+            pid: d.pid,
+            socket: d.socket.to_string_lossy().into(),
+            started_at: d.started_at,
+        }
+    }
 }

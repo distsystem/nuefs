@@ -9,7 +9,6 @@ dist/
 
 # Rust
 /target/
-Cargo.lock
 
 # IDE
 .DS_Store

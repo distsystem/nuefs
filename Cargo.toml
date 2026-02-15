@@ -4,31 +4,23 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "_nuefs"
-crate-type = ["cdylib", "rlib"]
+name = "nuefs_rs"
+
+[[bin]]
+name = "nuefsd"
 
 [dependencies]
-pyo3 = { version = "0.26", features = ["extension-module", "abi3-py312"] }
-pyo3-stub-gen = "0.18.0"
+prost = "0.13"
+serde = { version = "1", features = ["derive"] }
 fuse_mt = "0.6"
 fuser = "0.16"
 libc = "0.2"
 rustix = { version = "1", features = ["fs", "process"] }
 thiserror = "2"
 parking_lot = "0.12"
-serde = { version = "1", features = ["derive"] }
-tarpc = { version = "0.35", features = ["tokio1", "serde-transport-bincode", "unix"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "macros"] }
-futures = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[[bin]]
-name = "nuefsd"
-
-[[bin]]
-name = "stub_gen"
-required-features = ["stub"]
-
-[features]
-stub = []
+[build-dependencies]
+prost-build = "0.13"

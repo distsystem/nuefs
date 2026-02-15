@@ -1,0 +1,90 @@
+syntax = "proto3";
+package nuefs;
+
+// -- Data types --
+
+message ManifestEntry {
+  string virtual_path = 1;
+  string backend_path = 2;
+  bool is_dir = 3;
+}
+
+message MountRoot {
+  string virtual_prefix = 1;
+  string backend_path = 2;
+}
+
+message OwnerInfo {
+  string owner = 1;
+  string backend_path = 2;
+}
+
+message MountStatus {
+  uint64 mount_id = 1;
+  string root = 2;
+}
+
+message DaemonInfo {
+  uint32 pid = 1;
+  string socket = 2;
+  uint64 started_at = 3;
+}
+
+// -- Requests --
+
+message Request {
+  oneof method {
+    MountReq mount = 1;
+    UnmountReq unmount = 2;
+    WhichReq which = 3;
+    StatusReq status = 4;
+    DaemonInfoReq daemon_info = 5;
+    UpdateReq update = 6;
+    ResolveReq resolve = 7;
+    ShutdownReq shutdown = 8;
+  }
+}
+
+message MountReq {
+  string root = 1;
+  repeated ManifestEntry entries = 2;
+  repeated MountRoot mount_roots = 3;
+}
+
+message UnmountReq { uint64 mount_id = 1; }
+message WhichReq { uint64 mount_id = 1; string path = 2; }
+message StatusReq {}
+message DaemonInfoReq {}
+
+message UpdateReq {
+  uint64 mount_id = 1;
+  repeated ManifestEntry entries = 2;
+  repeated MountRoot mount_roots = 3;
+}
+
+message ResolveReq { string root = 1; }
+message ShutdownReq {}
+
+// -- Responses --
+
+message Response {
+  oneof result {
+    OkPayload ok = 1;
+    string error = 2;
+  }
+}
+
+message OkPayload {
+  oneof value {
+    uint64 mount_id = 1;
+    OwnerInfo owner_info = 2;
+    StatusList status = 3;
+    DaemonInfo daemon_info = 4;
+    ResolveResult resolve = 5;
+    Empty empty = 6;
+  }
+}
+
+message StatusList { repeated MountStatus mounts = 1; }
+message ResolveResult { optional uint64 mount_id = 1; }
+message Empty {}

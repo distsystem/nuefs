@@ -14,7 +14,7 @@ import rich
 import yaml
 from rich.tree import Tree
 
-import nuefs._nuefs as _ext
+from nuefs.core import ManifestEntry, MountRoot
 
 console = rich.get_console()
 
@@ -65,10 +65,10 @@ class MountEntry(pydantic.BaseModel):
     include: Pathspec = pydantic.Field(default_factory=Pathspec)
     vcs: bool = True
 
-    def resolve(self, root: pathlib.Path) -> dict[str, _ext.ManifestEntry]:
+    def resolve(self, root: pathlib.Path) -> dict[str, ManifestEntry]:
         """Resolve this mount entry into ManifestEntry mappings."""
         return {
-            vpath: _ext.ManifestEntry(
+            vpath: ManifestEntry(
                 virtual_path=vpath,
                 backend_path=path,
                 is_dir=is_dir,
@@ -196,8 +196,8 @@ class MountEntry(pydantic.BaseModel):
 
 
 def ensure_ancestors(
-    entries: dict[str, _ext.ManifestEntry],
-) -> dict[str, _ext.ManifestEntry]:
+    entries: dict[str, ManifestEntry],
+) -> dict[str, ManifestEntry]:
     """Fill in missing ancestor directory entries produced by _collapse_chain."""
     for vpath, entry in list(entries.items()):
         parts = vpath.split("/")
@@ -206,7 +206,7 @@ def ensure_ancestors(
             ancestor = "/".join(parts[:depth])
             backend = backend.parent
             if ancestor not in entries:
-                entries[ancestor] = _ext.ManifestEntry(
+                entries[ancestor] = ManifestEntry(
                     virtual_path=ancestor, backend_path=backend, is_dir=True,
                 )
     return entries
@@ -230,7 +230,7 @@ class Manifest(pydantic.BaseModel):
 
     def resolve_mounts(
         self, root: pathlib.Path,
-    ) -> collections.abc.Iterator[tuple[MountEntry, dict[str, _ext.ManifestEntry]]]:
+    ) -> collections.abc.Iterator[tuple[MountEntry, dict[str, ManifestEntry]]]:
         root = root.expanduser().resolve()
         for mount in self.mounts:
             resolved = mount.resolve(root)
@@ -240,8 +240,8 @@ class Manifest(pydantic.BaseModel):
 
 def print_tree(
     root: pathlib.Path,
-    sources: list[tuple[MountEntry, dict[str, _ext.ManifestEntry]]],
-    entries: dict[str, _ext.ManifestEntry],
+    sources: list[tuple[MountEntry, dict[str, ManifestEntry]]],
+    entries: dict[str, ManifestEntry],
 ) -> None:
     source_tree = Tree(f"[bold blue]{root}[/] [dim](sources)[/]")
     for mount_entry, resolved in sources:
@@ -255,7 +255,7 @@ def print_tree(
     console.print(merged_tree)
 
 
-def _render_entries(root_node: Tree, entries: dict[str, _ext.ManifestEntry]) -> None:
+def _render_entries(root_node: Tree, entries: dict[str, ManifestEntry]) -> None:
     nodes: dict[str, Tree] = {"": root_node}
 
     def _ensure_parent(path: str) -> Tree:

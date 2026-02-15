@@ -49,51 +49,55 @@ pixi run develop  # Build and install the package
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        Python                               │
+│                   Python (pure, no Rust ext)                 │
 │  handle = nuefs.open(root)                                  │
 │  handle.update(entries)                                     │
 │  handle.which(path)                                         │
 │  handle.close()                                             │
 └─────────────────────────────────────────────────────────────┘
-                              │ pyo3 FFI
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Rust Extension (_nuefs.so)                │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
-│  │ #[pyclass]  │    │ IPC Client  │    │ Auto-start  │     │
-│  │ ManifestEntry│   │ Unix Socket │    │ nuefsd      │     │
-│  │ RawHandle   │    │ tarpc       │    │ (if needed) │     │
-│  └─────────────┘    └─────────────┘    └─────────────┘     │
-└─────────────────────────────────────────────────────────────┘
-                              │ IPC (Unix Socket)
-                              ▼
+                    │ protobuf over Unix socket
+                    │ (length-prefix framing, betterproto2)
+                    ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                   Rust Daemon (nuefsd)                      │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
 │  │ IPC Server  │    │ Mount       │    │ FUSE        │     │
-│  │ Dispatcher  │───▶│ Manager     │───▶│ Sessions    │     │
+│  │ prost/proto │───▶│ Manager     │───▶│ Sessions    │     │
 │  └─────────────┘    └─────────────┘    └─────────────┘     │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+IPC protocol: `proto/nuefs.proto` (single source of truth)
+- Rust side: prost (build.rs compiles proto)
+- Python side: betterproto2 (buf generate)
 
 ## Project Structure
 
 ```
 nuefs/
-├── Cargo.toml
+├── proto/nuefs.proto    # IPC protocol definition
+├── build.rs             # prost-build proto compilation
+├── Cargo.toml           # Rust daemon package (nuefs_rs)
+├── pyproject.toml       # Python package (hatchling)
 ├── src/
-│   ├── lib.rs          # pyo3 entry (Python API)
-│   ├── client.rs       # IPC client
-│   ├── types.rs        # Shared type definitions
+│   ├── lib.rs           # module declarations + proto include
+│   ├── types.rs         # internal types + proto conversions
 │   ├── daemon/
 │   │   ├── mod.rs
-│   │   ├── server.rs   # IPC server
-│   │   ├── manager.rs  # Mount manager
-│   │   └── fuse.rs     # FUSE implementation
+│   │   ├── server.rs    # protobuf IPC server (tokio)
+│   │   ├── manager.rs   # mount manager
+│   │   └── fuse.rs      # FUSE implementation (fuse_mt)
 │   └── bin/
-│       └── nuefsd.rs   # Daemon entry
-└── python/
-    └── nuefs/
-        ├── __init__.py
-        └── cli.py
+│       └── nuefsd.rs    # daemon entry
+├── python/
+│   └── nuefs/
+│       ├── __init__.py  # public API re-exports
+│       ├── _ipc.py      # protobuf IPC client
+│       ├── _proto/      # generated betterproto2 code
+│       ├── core.py      # dataclasses + Handle
+│       ├── manifest.py  # manifest parsing
+│       └── cli.py       # CLI (nue mount/unmount/status/stop)
+└── nuefsd/
+    ├── pixi.toml        # separate pixi package for daemon
+    └── recipe.yaml      # rattler-build recipe
 ```

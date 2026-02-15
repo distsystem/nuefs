@@ -100,9 +100,9 @@ async fn main() {
         );
     }));
 
-    let socket = socket.unwrap_or_else(_nuefs::runtime::default_socket_path);
+    let socket = socket.unwrap_or_else(nuefs_rs::runtime::default_socket_path);
     info!(socket = %socket.display(), pid = std::process::id(), log = %log_path, "nuefsd starting");
-    if let Err(e) = _nuefs::daemon::server::serve(socket).await {
+    if let Err(e) = nuefs_rs::daemon::server::serve(socket).await {
         eprintln!("nuefsd: fatal error: {e}");
         std::process::exit(1);
     }

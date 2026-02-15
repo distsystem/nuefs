@@ -1,15 +1,64 @@
 """NueFS core implementation."""
 
 import collections.abc
+import dataclasses
 import os
 import pathlib
 import typing
 
-import nuefs._nuefs as _ext
+from nuefs import _ipc
+from nuefs._proto import (
+    DaemonInfoReq,
+    MountReq,
+    ResolveReq,
+    Request,
+    ShutdownReq,
+    StatusReq,
+    UnmountReq,
+    UpdateReq,
+    WhichReq,
+)
+from nuefs._proto import ManifestEntry as ProtoEntry
+from nuefs._proto import MountRoot as ProtoMount
 
-ManifestEntry = _ext.ManifestEntry
-OwnerInfo = _ext.OwnerInfo
-DaemonInfo = _ext.DaemonInfo
+
+@dataclasses.dataclass
+class ManifestEntry:
+    virtual_path: str
+    backend_path: pathlib.Path
+    is_dir: bool
+
+    def _to_proto(self) -> ProtoEntry:
+        return ProtoEntry(
+            virtual_path=self.virtual_path,
+            backend_path=str(self.backend_path),
+            is_dir=self.is_dir,
+        )
+
+
+@dataclasses.dataclass
+class MountRoot:
+    virtual_prefix: str
+    backend_path: pathlib.Path
+
+    def _to_proto(self) -> ProtoMount:
+        return ProtoMount(
+            virtual_prefix=self.virtual_prefix,
+            backend_path=str(self.backend_path),
+        )
+
+
+@dataclasses.dataclass
+class OwnerInfo:
+    owner: str
+    backend_path: pathlib.Path
+
+
+@dataclasses.dataclass
+class DaemonInfo:
+    pid: int
+    socket: pathlib.Path
+    started_at: int
 
 
 class Handle:
@@ -29,18 +78,35 @@ class Handle:
     def update(
         self,
         entries: collections.abc.Sequence[ManifestEntry],
-        mount_roots: collections.abc.Sequence[_ext.MountRoot] | None = None,
+        mount_roots: collections.abc.Sequence[MountRoot] | None = None,
     ) -> None:
         """Update the mount manifest."""
-        _ext._update(self._mount_id, list(entries), list(mount_roots or []))
+        _ipc.call(
+            Request(
+                update=UpdateReq(
+                    mount_id=self._mount_id,
+                    entries=[e._to_proto() for e in entries],
+                    mount_roots=[m._to_proto() for m in (mount_roots or [])],
+                )
+            )
+        )
 
     def which(self, path: str) -> OwnerInfo | None:
         """Query which backend owns a path."""
-        return _ext._which(self._mount_id, path)
+        resp = _ipc.call(
+            Request(which=WhichReq(mount_id=self._mount_id, path=path))
+        )
+        ok = resp.ok
+        if ok is None:
+            return None
+        info = ok.owner_info
+        if info is None or not info.owner:
+            return None
+        return OwnerInfo(owner=info.owner, backend_path=pathlib.Path(info.backend_path))
 
     def unmount(self) -> None:
         """Unmount the filesystem."""
-        _ext._unmount(self._mount_id)
+        _ipc.call(Request(unmount=UnmountReq(mount_id=self._mount_id)))
 
     def close(self) -> None:
         """Release the client handle (mount stays alive in daemon)."""
@@ -62,29 +128,40 @@ def open(root: str | os.PathLike[str] | pathlib.Path) -> Handle:
     """Open a NueFS mount, creating an empty one if it doesn't exist."""
     root_path = pathlib.Path(root).expanduser().resolve()
 
-    mount_id = _ext._resolve(root_path)
-    if mount_id is not None:
-        return Handle(str(root_path), mount_id)
+    resp = _ipc.call(Request(resolve=ResolveReq(root=str(root_path))))
+    ok = resp.ok
+    if ok is not None and ok.resolve is not None and ok.resolve.mount_id is not None:
+        return Handle(str(root_path), ok.resolve.mount_id)
 
-    raw = _ext._mount(root_path, [], [])
-    return Handle(str(raw.root), raw.mount_id)
+    resp = _ipc.call(Request(mount=MountReq(root=str(root_path))))
+    return Handle(str(root_path), resp.ok.mount_id)
 
 
 def status() -> list[Handle]:
     """List all active mounts."""
-    return [Handle(str(h.root), h.mount_id) for h in _ext._status()]
+    resp = _ipc.call(Request(status=StatusReq()))
+    ok = resp.ok
+    if ok is None or ok.status is None:
+        return []
+    return [Handle(m.root, m.mount_id) for m in ok.status.mounts]
 
 
 def daemon_info() -> DaemonInfo:
     """Get information about the daemon process."""
-    return _ext._daemon_info()
+    resp = _ipc.call(Request(daemon_info=DaemonInfoReq()))
+    info = resp.ok.daemon_info
+    return DaemonInfo(
+        pid=info.pid,
+        socket=pathlib.Path(info.socket),
+        started_at=info.started_at,
+    )
 
 
 def shutdown() -> None:
     """Shutdown the daemon gracefully."""
-    _ext._shutdown()
+    _ipc.call(Request(shutdown=ShutdownReq()))
 
 
 def default_socket_path() -> pathlib.Path:
     """Get the default socket path for the daemon."""
-    return pathlib.Path(_ext._default_socket_path())
+    return _ipc.default_socket_path()
