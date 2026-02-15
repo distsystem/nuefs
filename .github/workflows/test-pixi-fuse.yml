@@ -21,8 +21,10 @@ jobs:
           pixi-version: v0.63.2
           pixi-url: https://github.com/fecet/pixi/releases/download/{{version}}/{{pixiFile}}
           run-install: false
-      - name: Build nuefs package
-        run: pixi build -o output
+      - name: Build packages
+        run: |
+          pixi build -o output
+          pixi build -o output --path nuefsd
       - uses: actions/upload-artifact@v4
         with:
           name: nuefs-conda
@@ -45,17 +47,16 @@ jobs:
           name: nuefs-conda
           path: output/
 
-      - name: Resolve conda package path
-        id: pkg
-        run: echo "path=$(ls output/nuefs-*.conda)" >> "$GITHUB_OUTPUT"
-
       - uses: prefix-dev/setup-pixi@v0.9.4
         with:
           pixi-version: v0.63.2
           pixi-url: https://github.com/fecet/pixi/releases/download/{{version}}/{{pixiFile}}
           run-install: false
-          global-environments: |
-            nuefs --path ${{ steps.pkg.outputs.path }}
+
+      - name: Install nuefs and nuefsd globally
+        run: |
+          pixi global install nuefs --path output/nuefs-0*.conda -c https://repo.prefix.dev/meta-forge -c conda-forge
+          pixi global install nuefsd --path output/nuefsd-*.conda -c conda-forge
 
       - name: Checkout mundi
         run: gh repo clone distsystem/mundi ../mundi -- --depth 1
