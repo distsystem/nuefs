@@ -7,8 +7,5 @@ name = "pixi-build-rust"
 version = "*"
 channels = ["https://prefix.dev/pixi-build-backends", "conda-forge"]
 
-[package.build-dependencies]
-protobuf = "*"
-
 [package.host-dependencies]
 libfuse3 = "*"

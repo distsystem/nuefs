@@ -30,6 +30,10 @@ buf = "*"
 ruff = "~=0.9.3"
 grpcio = "*"
 betterproto2 = "*"
+rust = "*"
+
+[feature.proto.tasks]
+protogen = "cargo install protoc-gen-prost --root \"$CONDA_PREFIX\" --quiet && buf generate proto"
 
 [feature.proto.pypi-dependencies]
 betterproto2-compiler = ">=0.9.0"
@@ -44,7 +48,6 @@ stop = "nue stop 2>/dev/null || pkill -9 nuefsd || true"
 test = "pytest tests -v"
 bench = "python -m tests.bench_fio"
 posixtest = "python -m uposixtest"
-protogen = "buf generate proto"
 
 [dependencies]
 nuefs = { path = "." }

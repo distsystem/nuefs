@@ -8,7 +8,7 @@ import struct
 import subprocess
 import time
 
-from nuefs._proto import Request, Response
+from nuefs._proto.nuefs import Request, Response
 
 
 def default_socket_path() -> pathlib.Path:

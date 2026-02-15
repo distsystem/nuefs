@@ -7,9 +7,11 @@ import pathlib
 import typing
 
 from nuefs import _ipc
-from nuefs._proto import (
+from nuefs._proto.nuefs import (
     DaemonInfoReq,
+    ManifestEntry as ProtoEntry,
     MountReq,
+    MountRoot as ProtoMount,
     ResolveReq,
     Request,
     ShutdownReq,
@@ -18,8 +20,6 @@ from nuefs._proto import (
     UpdateReq,
     WhichReq,
 )
-from nuefs._proto import ManifestEntry as ProtoEntry
-from nuefs._proto import MountRoot as ProtoMount
 
 
 @dataclasses.dataclass

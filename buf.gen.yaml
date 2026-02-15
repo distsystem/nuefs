@@ -2,3 +2,5 @@ version: v2
 plugins:
   - local: protoc-gen-python_betterproto2
     out: python/nuefs/_proto
+  - local: protoc-gen-prost
+    out: nuefsd/src
