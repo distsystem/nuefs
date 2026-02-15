@@ -12,7 +12,6 @@ name = "nuefsd"
 [dependencies]
 prost = "0.13"
 serde = { version = "1", features = ["derive"] }
-fuse_mt = "0.6"
 fuser = "0.16"
 libc = "0.2"
 rustix = { version = "1", features = ["fs", "process"] }
