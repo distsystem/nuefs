@@ -75,29 +75,30 @@ IPC protocol: `proto/nuefs.proto` (single source of truth)
 
 ```
 nuefs/
-├── proto/nuefs.proto    # IPC protocol definition
-├── build.rs             # prost-build proto compilation
-├── Cargo.toml           # Rust daemon package (nuefs_rs)
-├── pyproject.toml       # Python package (hatchling)
-├── src/
-│   ├── lib.rs           # module declarations + proto include
-│   ├── types.rs         # internal types + proto conversions
-│   ├── daemon/
-│   │   ├── mod.rs
-│   │   ├── server.rs    # protobuf IPC server (tokio)
-│   │   ├── manager.rs   # mount manager
-│   │   └── fuse.rs      # FUSE implementation (fuse_mt)
-│   └── bin/
-│       └── nuefsd.rs    # daemon entry
+├── pixi.toml            # workspace orchestrator
+├── pyproject.toml        # Python package (hatchling)
+├── proto/nuefs.proto     # IPC protocol definition
 ├── python/
 │   └── nuefs/
-│       ├── __init__.py  # public API re-exports
-│       ├── _ipc.py      # protobuf IPC client
-│       ├── _proto/      # generated betterproto2 code
-│       ├── core.py      # dataclasses + Handle
-│       ├── manifest.py  # manifest parsing
-│       └── cli.py       # CLI (nue mount/unmount/status/stop)
-└── nuefsd/
-    ├── pixi.toml        # separate pixi package for daemon
-    └── recipe.yaml      # rattler-build recipe
+│       ├── __init__.py   # public API re-exports
+│       ├── _ipc.py       # protobuf IPC client
+│       ├── _proto/       # generated betterproto2 code
+│       ├── core.py       # dataclasses + Handle
+│       ├── manifest.py   # manifest parsing
+│       └── cli.py        # CLI (nue mount/unmount/status/stop)
+└── nuefsd/               # Rust daemon (self-contained)
+    ├── Cargo.toml
+    ├── build.rs          # prost-build proto compilation
+    ├── pixi.toml         # pixi package for daemon
+    ├── recipe.yaml       # rattler-build recipe
+    └── src/
+        ├── lib.rs        # module declarations + proto include
+        ├── types.rs      # internal types + proto conversions
+        ├── daemon/
+        │   ├── mod.rs
+        │   ├── server.rs # protobuf IPC server (tokio)
+        │   ├── manager.rs# mount manager
+        │   └── fuse.rs   # FUSE implementation (fuse_mt)
+        └── bin/
+            └── nuefsd.rs # daemon entry
 ```

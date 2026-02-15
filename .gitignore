@@ -8,7 +8,7 @@ __pycache__/
 dist/
 
 # Rust
-/target/
+/nuefsd/target/
 
 # IDE
 .DS_Store

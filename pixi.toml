@@ -9,9 +9,21 @@ name = "nuefs"
 version = "0.1.0"
 
 [package.build.backend]
-name = "pixi-build-rattler-build"
+name = "pixi-build-python"
 version = "*"
 channels = ["https://prefix.dev/pixi-build-backends", "conda-forge"]
+
+[package.host-dependencies]
+hatchling = "*"
+
+[package.run-dependencies]
+python = ">=3.12"
+betterproto2 = ">=0.9.0"
+pydantic-settings = ">=2.0"
+pyyaml = "*"
+rich = ">=13.0"
+pathspec = "*"
+pygit2 = "*"
 
 [feature.proto.dependencies]
 buf = "*"
@@ -26,7 +38,7 @@ betterproto2-compiler = ">=0.9.0"
 proto = { features = ["proto"], no-default-feature = true }
 
 [tasks]
-check = "cargo check"
+check = "cargo check --manifest-path nuefsd/Cargo.toml"
 kill = "pkill -9 nuefsd || true"
 stop = "nue stop 2>/dev/null || pkill -9 nuefsd || true"
 test = "pytest tests -v"

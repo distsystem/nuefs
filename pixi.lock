@@ -882,7 +882,6 @@ packages:
   variants:
     target_platform: linux-64
   depends:
-  - libgcc >=15
   - libfuse3 >=3.18.1,<4.0a0
   constrains:
   - __glibc >=2.17
