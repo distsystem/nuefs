@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fuse_mt::{
     CallbackResult, CreatedEntry, DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo,
     ResultCreate, ResultData, ResultEmpty, ResultEntry, ResultOpen, ResultReaddir, ResultSlice,
-    ResultWrite,
+    ResultStatfs, ResultWrite, Statfs,
 };
 use parking_lot::RwLock;
 use tracing::{debug, error, warn};
@@ -406,7 +406,8 @@ impl FilesystemMT for NueFs {
         let manifest = self.manifest.read();
         let old_io = manifest.resolve_io(&old_rel);
         let new_io = if parent == newparent {
-            old_io.parent().unwrap_or(&old_io).join(newname)
+            let rel_parent = Self::to_rel_string(parent);
+            manifest.resolve_io(&rel_parent).join(newname)
         } else {
             let newparent_rel = Self::to_rel_string(newparent);
             manifest.resolve_io(&newparent_rel).join(newname)
@@ -530,6 +531,29 @@ impl FilesystemMT for NueFs {
             map_errno(e)
         })?;
         Ok(())
+    }
+
+    fn statfs(&self, _req: RequestInfo, path: &Path) -> ResultStatfs {
+        let rel = Self::to_rel_string(path);
+        let io = self.resolve_io(&rel);
+        let c_path = std::ffi::CString::new(io.as_os_str().as_bytes()).map_err(|_| libc::EINVAL)?;
+        let mut stat: libc::statvfs64 = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::statvfs64(c_path.as_ptr(), &mut stat) };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO));
+        }
+        Ok(Statfs {
+            blocks: stat.f_blocks,
+            bfree: stat.f_bfree,
+            bavail: stat.f_bavail,
+            files: stat.f_files,
+            ffree: stat.f_ffree,
+            bsize: stat.f_bsize as u32,
+            namelen: stat.f_namemax as u32,
+            frsize: stat.f_frsize as u32,
+        })
     }
 
     fn opendir(&self, _req: RequestInfo, _path: &Path, _flags: u32) -> ResultOpen {
