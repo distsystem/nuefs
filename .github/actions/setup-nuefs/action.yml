@@ -10,10 +10,21 @@ inputs:
       Override: path or URL to a .conda file. Local paths support globs.
       When set, version is ignored.
     default: ""
-  config:
+  manifest:
     description: >
-      Path to nue.yaml. When set, runs `nue mount -c <config>` after install.
+      Path to nue.yaml. When set, runs `nue mount -m <manifest>` after install.
     default: ""
+  manifest-content:
+    description: >
+      Inline nue.yaml content. Written to <mountpoint>/nue.yaml.
+      Source paths resolve relative to mountpoint.
+      Takes precedence over manifest when both are set.
+    default: ""
+  mountpoint:
+    description: >
+      Directory where the FUSE filesystem is mounted. Inline config is
+      written here; source paths in the manifest resolve relative to it.
+    default: "."
 
 runs:
   using: composite
@@ -74,7 +85,19 @@ runs:
         -c https://repo.prefix.dev/meta-forge
         -c conda-forge
 
-    - name: Mount workspace
-      if: inputs.config != ''
+    - name: Write inline manifest
+      if: inputs.manifest-content != ''
       shell: bash
-      run: nue mount -c "${{ inputs.config }}"
+      env:
+        MANIFEST_CONTENT: ${{ inputs.manifest-content }}
+      run: printf '%s\n' "$MANIFEST_CONTENT" > "${{ inputs.mountpoint }}/nue.yaml"
+
+    - name: Mount workspace
+      if: inputs.manifest != '' || inputs.manifest-content != ''
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.manifest-content }}" ]; then
+          nue mount -m "${{ inputs.mountpoint }}/nue.yaml"
+        else
+          nue mount -m "${{ inputs.manifest }}"
+        fi

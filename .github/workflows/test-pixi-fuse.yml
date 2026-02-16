@@ -41,7 +41,7 @@ jobs:
       - uses: ./.github/actions/setup-nuefs
         with:
           conda-url: output/nuefs-*.conda
-          config: ../mundi/nue.yaml
+          manifest: ../mundi/nue.yaml
 
       - name: Setup mundi project
         working-directory: ../mundi
