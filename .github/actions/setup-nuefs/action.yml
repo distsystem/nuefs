@@ -1,0 +1,94 @@
+name: Setup NueFS
+description: Install nuefs from conda package and optionally mount a workspace
+
+inputs:
+  version:
+    description: >
+      Release version (latest/v0.2.0/0.2.0). Ignored when artifact-path is set.
+    default: latest
+  artifact-path:
+    description: >
+      Local .conda file path (supports glob). Skips release download when set.
+    default: ""
+  config:
+    description: >
+      Path to nue.yaml. When set, runs `nue mount -c <config>` after install.
+    default: ""
+  token:
+    description: GitHub token for downloading release assets.
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install fuse3
+      shell: bash
+      run: sudo apt-get install -y -qq fuse3 > /dev/null
+
+    - name: Setup pixi
+      uses: prefix-dev/setup-pixi@v0.9.4
+      with:
+        pixi-version: v0.63.2
+        pixi-url: https://github.com/fecet/pixi/releases/download/{{version}}/{{pixiFile}}
+        run-install: false
+
+    - name: Download release asset
+      if: inputs.artifact-path == ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        mkdir -p /tmp/nuefs-conda
+
+        if [ "$VERSION" = "latest" ]; then
+          tag_flag=""
+        else
+          # Normalize: strip leading v, then build tag
+          ver="${VERSION#v}"
+          tag_flag="--pattern nuefs-v${ver}"
+          tag_flag="nuefs-v${ver}"
+        fi
+
+        if [ -z "$tag_flag" ]; then
+          gh release download --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.conda' --dir /tmp/nuefs-conda
+        else
+          gh release download "$tag_flag" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.conda' --dir /tmp/nuefs-conda
+        fi
+
+    - name: Resolve conda path
+      id: conda
+      shell: bash
+      env:
+        ARTIFACT_PATH: ${{ inputs.artifact-path }}
+      run: |
+        if [ -n "$ARTIFACT_PATH" ]; then
+          # Expand glob
+          files=( $ARTIFACT_PATH )
+          conda_path="${files[0]}"
+        else
+          files=( /tmp/nuefs-conda/*.conda )
+          conda_path="${files[0]}"
+        fi
+
+        if [ ! -f "$conda_path" ]; then
+          echo "::error::No .conda file found"
+          exit 1
+        fi
+
+        echo "path=$conda_path" >> "$GITHUB_OUTPUT"
+
+    - name: Install nuefs globally
+      shell: bash
+      run: >
+        pixi global install nuefs
+        --path "${{ steps.conda.outputs.path }}"
+        -c https://repo.prefix.dev/meta-forge
+        -c conda-forge
+
+    - name: Mount workspace
+      if: inputs.config != ''
+      shell: bash
+      run: nue mount -c "${{ inputs.config }}"

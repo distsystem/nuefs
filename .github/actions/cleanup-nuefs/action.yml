@@ -1,0 +1,29 @@
+name: Cleanup NueFS
+description: Unmount and stop nuefs daemon with graceful degradation
+
+inputs:
+  root:
+    description: Mount directory to unmount. If empty, uses default.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Cleanup nuefs
+      if: always()
+      shell: bash
+      env:
+        ROOT: ${{ inputs.root }}
+      run: |
+        if [ -n "$ROOT" ]; then
+          nue unmount "$ROOT" 2>/dev/null || true
+        else
+          nue unmount 2>/dev/null || true
+        fi
+        nue stop 2>/dev/null || true
+
+        # Force cleanup if daemon is still running
+        if [ -n "$ROOT" ]; then
+          fusermount3 -uz "$ROOT" 2>/dev/null || true
+        fi
+        pkill -9 nuefsd 2>/dev/null || true
