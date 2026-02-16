@@ -956,7 +956,7 @@ packages:
   timestamp: 1738195959188
 - conda: .
   name: nuefs
-  version: 0.1.0
+  version: 0.2.0
   build: hb0f4dca_0
   subdir: linux-64
   variants:

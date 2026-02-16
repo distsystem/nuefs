@@ -40,7 +40,7 @@ jobs:
 
       - uses: ./.github/actions/setup-nuefs
         with:
-          artifact-path: output/nuefs-*.conda
+          conda-url: output/nuefs-*.conda
           config: ../mundi/nue.yaml
 
       - name: Setup mundi project
