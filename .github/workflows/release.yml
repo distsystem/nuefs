@@ -10,10 +10,33 @@ permissions:
   pull-requests: write
 
 jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      nuefs-release-created: ${{ steps.rp.outputs['nuefs--release_created'] }}
+      nuefs-tag-name: ${{ steps.rp.outputs['nuefs--tag_name'] }}
     steps:
       - uses: googleapis/release-please-action@v4
+        id: rp
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  upload-release:
+    needs: [build, release-please]
+    if: needs.release-please.outputs.nuefs-release-created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nuefs-conda
+          path: output/
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-please.outputs.nuefs-tag-name }}
+          files: output/*.conda
