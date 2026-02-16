@@ -86,7 +86,6 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/yaml-0.2.5-h280c20c_3.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_6.conda
       - conda: .
-      - conda: nuefsd
       - pypi: ./uposixtest
   proto:
     channels:
@@ -958,28 +957,22 @@ packages:
 - conda: .
   name: nuefs
   version: 0.1.0
-  build: pyh4616a5c_0
-  subdir: noarch
+  build: hb0f4dca_0
+  subdir: linux-64
   variants:
-    target_platform: noarch
+    target_platform: linux-64
   depends:
   - python >=3.12
-  - python *
   - betterproto2 >=0.9.0
   - pydantic-settings >=2.0
   - pyyaml
   - rich >=13.0
   - pathspec
   - pygit2
-- conda: nuefsd
-  name: nuefsd
-  version: 0.1.0
-  build: hb0f4dca_0
-  subdir: linux-64
-  variants:
-    target_platform: linux-64
-  depends:
+  - libfuse3
   - libfuse3 >=3.18.1,<4.0a0
+  - libgcc >=15
+  - python_abi 3.12.* *_cp312
   constrains:
   - __glibc >=2.17
 - conda: https://conda.anaconda.org/conda-forge/linux-64/openssl-3.6.1-h35e630c_1.conda

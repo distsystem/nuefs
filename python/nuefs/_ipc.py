@@ -6,6 +6,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import time
 
 from nuefs._proto.nuefs import Request, Response
@@ -47,6 +48,9 @@ def _find_nuefsd() -> pathlib.Path | None:
     found = shutil.which("nuefsd")
     if found:
         return pathlib.Path(found)
+    prefix_bin = pathlib.Path(sys.prefix) / "bin" / "nuefsd"
+    if prefix_bin.exists():
+        return prefix_bin
     return None
 
 

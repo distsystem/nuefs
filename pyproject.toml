@@ -20,3 +20,5 @@ nue = "nuefs.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["python/nuefs"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]

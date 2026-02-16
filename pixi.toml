@@ -13,8 +13,16 @@ name = "pixi-build-python"
 version = "*"
 channels = ["https://prefix.dev/pixi-build-backends", "conda-forge"]
 
+[package.build.config]
+noarch = false
+compilers = ["c"]
+extra-input-globs = ["nuefsd/src/**/*.rs", "nuefsd/Cargo.toml", "nuefsd/Cargo.lock"]
+
 [package.host-dependencies]
 hatchling = "*"
+python = "=3.12"
+rust = ">=1.85"
+libfuse3 = "*"
 
 [package.run-dependencies]
 python = ">=3.12"
@@ -24,6 +32,7 @@ pyyaml = "*"
 rich = ">=13.0"
 pathspec = "*"
 pygit2 = "*"
+libfuse3 = "*"
 
 [feature.proto.dependencies]
 buf = "*"
@@ -51,7 +60,6 @@ posixtest = "python -m uposixtest"
 
 [dependencies]
 nuefs = { path = "." }
-nuefsd = { path = "nuefsd" }
 pytest = "*"
 python = "=3.12"
 humanize = "*"
