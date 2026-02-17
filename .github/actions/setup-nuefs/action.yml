@@ -33,13 +33,6 @@ runs:
       shell: bash
       run: sudo apt-get install -y -qq fuse3 > /dev/null
 
-    - name: Setup pixi
-      uses: prefix-dev/setup-pixi@v0.9.4
-      with:
-        pixi-version: v0.63.2
-        pixi-url: https://github.com/fecet/pixi/releases/download/{{version}}/{{pixiFile}}
-        run-install: false
-
     - name: Resolve conda package
       id: conda
       shell: bash
@@ -79,11 +72,20 @@ runs:
 
     - name: Install nuefs globally
       shell: bash
-      run: >
-        pixi global install nuefs
-        --path "${{ steps.conda.outputs.path }}"
-        -c https://repo.prefix.dev/meta-forge
-        -c conda-forge
+      env:
+        CONDA_PATH: ${{ steps.conda.outputs.path }}
+      run: |
+        pixi_tmp="$(mktemp -d)"
+        curl -fsSL "https://github.com/fecet/pixi/releases/download/v0.63.2/pixi-x86_64-unknown-linux-musl.tar.gz" \
+          | tar -xz -C "$pixi_tmp"
+
+        "$pixi_tmp/pixi" global install nuefs \
+          --path "$CONDA_PATH" \
+          -c https://repo.prefix.dev/meta-forge \
+          -c conda-forge
+
+        echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
+        rm -rf "$pixi_tmp"
 
     - name: Write inline manifest
       if: inputs.manifest-content != ''

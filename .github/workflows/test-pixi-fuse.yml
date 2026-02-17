@@ -43,6 +43,12 @@ jobs:
           conda-url: output/nuefs-*.conda
           manifest: ../mundi/nue.yaml
 
+      - uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          pixi-version: v0.63.2
+          pixi-url: https://github.com/fecet/pixi/releases/download/{{version}}/{{pixiFile}}
+          run-install: false
+
       - name: Setup mundi project
         working-directory: ../mundi
         run: |
