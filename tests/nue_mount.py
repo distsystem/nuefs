@@ -38,7 +38,7 @@ def lazy_unmount(root: pathlib.Path) -> None:
 def mount(root: pathlib.Path) -> Iterator[pathlib.Path]:
     """Mount nuefs at *root* (expects nue.yaml), unmount on exit."""
     subprocess.run(
-        ["nue", "mount", "-c", str(root / "nue.yaml")],
+        ["nue", "mount", "-m", str(root / "nue.yaml")],
         check=True, timeout=15,
     )
     wait_for_mount(root)
