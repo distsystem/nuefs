@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/distsystem/nuefs/compare/nuefs-v0.2.0...nuefs-v0.2.1) (2026-02-17)
+
+
+### Bug Fixes
+
+* **ci:** correct release-please output keys for root package ([316fbe5](https://github.com/distsystem/nuefs/commit/316fbe5cad66675cc7b984936b90156652341f28))
+
 ## [0.2.0](https://github.com/distsystem/nuefs/compare/nuefs-v0.1.0...nuefs-v0.2.0) (2026-02-16)
 
 
