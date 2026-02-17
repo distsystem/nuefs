@@ -16,8 +16,8 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     outputs:
-      nuefs-release-created: ${{ steps.rp.outputs['nuefs--release_created'] }}
-      nuefs-tag-name: ${{ steps.rp.outputs['nuefs--tag_name'] }}
+      nuefs-release-created: ${{ steps.rp.outputs.release_created }}
+      nuefs-tag-name: ${{ steps.rp.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: rp
