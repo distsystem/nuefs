@@ -130,7 +130,7 @@ class MountEntry(pydantic.BaseModel):
     def _git_toplevel_items(
         self, source: pathlib.Path,
     ) -> list[tuple[pathlib.Path, str, bool]] | None:
-        """Use pygit2 index to enumerate tracked top-level items under *source*.
+        """Use gitignore rules to enumerate non-ignored top-level items under *source*.
 
         Returns None if *source* is not a git repo (caller falls back to
         iterdir).
@@ -140,17 +140,14 @@ class MountEntry(pydantic.BaseModel):
         except pygit2.GitError:
             return None
 
-        seen: dict[str, bool] = {}
-        for entry in repo.index:
-            top = entry.path.split("/", 1)[0]
-            if top not in seen:
-                seen[top] = "/" in entry.path
-
         items: list[tuple[pathlib.Path, str, bool]] = []
-        for name, is_dir in seen.items():
-            path = source / name
-            if path.exists() and not self._is_excluded(name, is_dir=is_dir):
-                items.append((path, name, is_dir))
+        for item in source.iterdir():
+            is_dir = item.is_dir() and not item.is_symlink()
+            path_arg = f"{item.name}/" if is_dir else item.name
+            if repo.path_is_ignored(path_arg):
+                continue
+            if not self._is_excluded(item.name, is_dir=is_dir):
+                items.append((item, item.name, is_dir))
         return items
 
     def _iter_entries(
