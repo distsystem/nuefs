@@ -51,13 +51,6 @@ class Mount(BaseSettings):
     def run(self) -> None:
         manifest, root = Manifest.load(path=self.manifest)
 
-        if not self.dry_run:
-            git_path = root / ".git"
-            if git_path.exists():
-                gitdir_mod.ensure_external_gitdir(
-                    root, gitdir_mod.default_gitdir_root()
-                )
-
         sources = list(manifest.resolve_mounts(root))
         entries: dict[str, nuefs.ManifestEntry] = {}
         mount_roots: list[nuefs.MountRoot] = []

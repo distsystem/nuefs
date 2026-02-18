@@ -12,8 +12,6 @@ from nuefs.core import (
     shutdown,
     status,
 )
-from nuefs.gitdir import ensure_external_gitdir
-
 __all__ = [
     "DaemonInfo",
     "Handle",
@@ -22,7 +20,6 @@ __all__ = [
     "OwnerInfo",
     "daemon_info",
     "default_socket_path",
-    "ensure_external_gitdir",
     "open",
     "shutdown",
     "status",
