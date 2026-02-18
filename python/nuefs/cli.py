@@ -8,13 +8,15 @@ import rich
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, CliSubCommand, SettingsConfigDict, get_subcommand
 from rich.panel import Panel
+from rich.tree import Tree
 
 import nuefs
+from nuefs.core import ManifestEntry
 
 console = rich.get_console()
 
 from . import gitdir as gitdir_mod
-from .manifest import Manifest, ensure_ancestors, print_tree
+from .manifest import Manifest, MountEntry
 
 
 def _lazy_unmount(root: pathlib.Path) -> None:
@@ -62,17 +64,13 @@ class Mount(BaseSettings):
         external_vpaths: set[str] = set()
         for mount_entry, resolved in sources:
             entries.update(resolved)
-            source, prefix, _ = mount_entry._resolve_source(root)
-            mount_roots.append(
-                nuefs.MountRoot(virtual_prefix=prefix, backend_path=source)
-            )
-            if source != root:
+            mr = mount_entry.mount_root(root)
+            mount_roots.append(mr)
+            if mr.backend_path != root:
                 for vpath in resolved:
                     external_vpaths.add(vpath.split("/", 1)[0])
 
-        entries = ensure_ancestors(entries)
-
-        print_tree(root, sources, entries)
+        _print_tree(root, sources, entries)
 
         if self.dry_run:
             return
@@ -147,6 +145,33 @@ class Stop(BaseSettings):
 
         nuefs.shutdown()
         console.print("[green]daemon stopped[/]")
+
+
+def _print_tree(
+    root: pathlib.Path,
+    sources: list[tuple[MountEntry, dict[str, ManifestEntry]]],
+    entries: dict[str, ManifestEntry],
+) -> None:
+    source_tree = Tree(f"[bold blue]{root}[/] [dim](sources)[/]")
+    for mount_entry, resolved in sources:
+        branch = source_tree.add(f"[bold yellow]{mount_entry.source}[/]")
+        _render_entries(branch, resolved)
+    console.print(source_tree)
+    console.print()
+
+    merged_tree = Tree(f"[bold blue]{root}[/] [dim](merged)[/]")
+    _render_entries(merged_tree, entries)
+    console.print(merged_tree)
+
+
+def _render_entries(root_node: Tree, entries: dict[str, ManifestEntry]) -> None:
+    for entry in sorted(entries.values(), key=lambda e: e.virtual_path):
+        vpath = entry.virtual_path
+        if entry.is_dir:
+            label = f"[bold cyan]{vpath}/[/] [dim]→ {entry.backend_path}[/]"
+        else:
+            label = f"{vpath} [dim]→ {entry.backend_path}[/]"
+        root_node.add(label)
 
 
 def _daemon_running(socket_path: pathlib.Path) -> bool:
