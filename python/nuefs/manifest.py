@@ -48,7 +48,7 @@ class MountEntry(pydantic.BaseModel):
     dest: str = ""
     exclude: Pathspec = pydantic.Field(default=DEFAULT_EXCLUDE)
     include: Pathspec = pydantic.Field(default_factory=Pathspec)
-    vcs: bool = True
+    gitignore: bool = True
 
     def resolve(self, root: pathlib.Path) -> dict[str, ManifestEntry]:
         """Resolve this mount entry into ManifestEntry mappings."""
@@ -96,9 +96,9 @@ class MountEntry(pydantic.BaseModel):
     def _list_items(
         self, source: pathlib.Path,
     ) -> list[tuple[pathlib.Path, str, bool]]:
-        """List non-excluded top-level items under *source*, respecting gitignore when vcs=True."""
+        """List non-excluded top-level items under *source*, respecting gitignore when gitignore=True."""
         repo: pygit2.Repository | None = None
-        if self.vcs:
+        if self.gitignore:
             try:
                 repo = pygit2.Repository(source)
             except pygit2.GitError:

@@ -14,7 +14,7 @@ YAML_CONTENT = """\
 apiVersion: nue/v1
 mounts:
 - source: ./data/
-  vcs: false
+  gitignore: false
 """
 
 FIO_COMMON = {

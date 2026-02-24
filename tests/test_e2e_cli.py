@@ -21,10 +21,10 @@ mounts:
 - source: ./project-a/
   exclude:
     - __pycache__
-  vcs: false
+  gitignore: false
 - source: ./libs/
   dest: vendor
-  vcs: false
+  gitignore: false
 """
 
 
@@ -65,7 +65,7 @@ apiVersion: nue/v1
 mounts:
 - source: ./external/
   dest: vendor
-  vcs: false
+  gitignore: false
 """
 
 _SIG = pygit2.Signature("Test", "test@test.com")
