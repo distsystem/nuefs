@@ -4,6 +4,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use camino::Utf8PathBuf;
 use fuser::BackgroundSession;
 use parking_lot::RwLock;
 use thiserror::Error;
@@ -162,7 +163,7 @@ impl Manager {
             .iter()
             .map(|(mount_id, session)| MountStatus {
                 mount_id: *mount_id,
-                root: session.root.clone(),
+                root: utf8(&session.root),
             })
             .collect();
         mounts.sort_by_key(|m| m.mount_id);
@@ -225,7 +226,7 @@ impl Manager {
 
 #[derive(Clone, Debug)]
 struct Entry {
-    display_backend: PathBuf,
+    display_backend: Utf8PathBuf,
     io_backend: PathBuf,
     is_dir: bool,
 }
@@ -233,14 +234,14 @@ struct Entry {
 #[derive(Clone, Debug)]
 pub(crate) struct DualPath {
     #[allow(dead_code)]
-    pub(crate) display: PathBuf,
+    pub(crate) display: Utf8PathBuf,
     pub(crate) io: PathBuf,
 }
 
 #[derive(Clone, Debug)]
 struct MountRootEntry {
     virtual_prefix: String,
-    display_backend: PathBuf,
+    display_backend: Utf8PathBuf,
     io_backend: PathBuf,
 }
 
@@ -254,7 +255,7 @@ pub(crate) struct ReaddirPlan {
 /// Stateless design: `origins` (immutable snapshot) + `mount_roots` (ordered
 /// mount root list) replace the old mutable `entries` HashMap.
 pub(crate) struct Manifest {
-    display_root: PathBuf,
+    display_root: Utf8PathBuf,
     real_procfd_root: PathBuf,
     origins: HashMap<String, Entry>,
     mount_roots: Vec<MountRootEntry>,
@@ -281,17 +282,18 @@ impl Manifest {
 
 impl Manifest {
     pub(crate) fn from_entries(
-        display_root: PathBuf,
+        root: PathBuf,
         real_root_fd: i32,
         entries: Vec<ManifestEntry>,
         mount_roots: Vec<MountRoot>,
     ) -> Self {
+        let display_root = utf8(&root);
         let real_procfd_root = procfd_root(real_root_fd);
         let mut map = HashMap::new();
         for e in entries {
-            let io_backend = to_io_backend(&display_root, &real_procfd_root, &e.backend_path);
+            let io_backend = to_io_backend(root.as_path(), &real_procfd_root, e.backend_path.as_std_path());
             map.insert(
-                e.virtual_path,
+                e.virtual_path.into_string(),
                 Entry {
                     display_backend: e.backend_path,
                     io_backend,
@@ -303,9 +305,9 @@ impl Manifest {
         let mr_entries: Vec<MountRootEntry> = mount_roots
             .into_iter()
             .map(|mr| {
-                let io = to_io_backend(&display_root, &real_procfd_root, &mr.backend_path);
+                let io = to_io_backend(root.as_path(), &real_procfd_root, mr.backend_path.as_std_path());
                 MountRootEntry {
-                    virtual_prefix: mr.virtual_prefix,
+                    virtual_prefix: mr.virtual_prefix.into_string(),
                     display_backend: mr.backend_path,
                     io_backend: io,
                 }
@@ -320,13 +322,11 @@ impl Manifest {
         }
     }
 
-    fn owner_label(&self, backend_path: &PathBuf) -> String {
+    fn owner_label(&self, backend_path: &Utf8PathBuf) -> String {
         if backend_path.starts_with(&self.display_root) {
             "self".to_string()
         } else {
-            backend_path
-                .to_string_lossy()
-                .to_string()
+            backend_path.as_str().to_owned()
         }
     }
 
@@ -341,7 +341,7 @@ impl Manifest {
         let path = path.trim_start_matches('/');
 
         if let Some((entry, suffix)) = self.resolve_from_origins(path) {
-            let backend_path = join_path(&entry.display_backend, suffix);
+            let backend_path = join_utf8(&entry.display_backend, suffix);
             return Some(OwnerInfoWire {
                 owner: self.owner_label(&entry.display_backend),
                 backend_path,
@@ -352,7 +352,7 @@ impl Manifest {
         for mr in &self.mount_roots {
             if let Some(suffix) = strip_mount_prefix(path, &mr.virtual_prefix) {
                 let candidate = mr.display_backend.join(suffix);
-                if candidate.symlink_metadata().is_ok() {
+                if candidate.as_std_path().symlink_metadata().is_ok() {
                     return Some(OwnerInfoWire {
                         owner: self.owner_label(&mr.display_backend),
                         backend_path: candidate,
@@ -370,7 +370,7 @@ impl Manifest {
         // 1. origins (exact match + dir prefix)
         if let Some((entry, suffix)) = self.resolve_from_origins(path) {
             return DualPath {
-                display: join_path(&entry.display_backend, suffix),
+                display: join_utf8(&entry.display_backend, suffix),
                 io: join_path(&entry.io_backend, suffix),
             };
         }
@@ -552,6 +552,18 @@ fn join_path(base: &PathBuf, suffix: &str) -> PathBuf {
     }
 }
 
+fn join_utf8(base: &Utf8PathBuf, suffix: &str) -> Utf8PathBuf {
+    if suffix.is_empty() {
+        base.clone()
+    } else {
+        base.join(suffix)
+    }
+}
+
+fn utf8(path: &Path) -> Utf8PathBuf {
+    Utf8PathBuf::from_path_buf(path.to_path_buf()).expect("path is not valid UTF-8")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,18 +587,18 @@ mod tests {
 
         let entries = vec![
             ManifestEntry {
-                virtual_path: "".to_string(),
-                backend_path: root.clone(),
+                virtual_path: Utf8PathBuf::new(),
+                backend_path: utf8(&root),
                 is_dir: true,
             },
             ManifestEntry {
-                virtual_path: "real.txt".to_string(),
-                backend_path: root.join("real.txt"),
+                virtual_path: Utf8PathBuf::from("real.txt"),
+                backend_path: utf8(&root.join("real.txt")),
                 is_dir: false,
             },
             ManifestEntry {
-                virtual_path: "vendor".to_string(),
-                backend_path: PathBuf::from("/opt/vendor"),
+                virtual_path: Utf8PathBuf::from("vendor"),
+                backend_path: Utf8PathBuf::from("/opt/vendor"),
                 is_dir: true,
             },
         ];
@@ -594,7 +606,7 @@ mod tests {
         let manifest = Manifest::from_entries(root.clone(), raw_fd, entries, vec![]);
 
         let p = manifest.resolve_paths("real.txt");
-        assert_eq!(p.display, root.join("real.txt"));
+        assert_eq!(p.display, utf8(&root.join("real.txt")));
         assert_eq!(p.io, procfd_root(raw_fd).join("real.txt"));
 
         let p = manifest.resolve_paths("vendor/a.txt");
@@ -602,7 +614,7 @@ mod tests {
         assert_eq!(p.io, PathBuf::from("/opt/vendor").join("a.txt"));
 
         let p = manifest.resolve_paths("missing.txt");
-        assert_eq!(p.display, root.join("missing.txt"));
+        assert_eq!(p.display, utf8(&root.join("missing.txt")));
         assert_eq!(p.io, procfd_root(raw_fd).join("missing.txt"));
 
         drop(root_fd);
@@ -619,8 +631,8 @@ mod tests {
         let raw_fd = root_fd.as_raw_fd();
 
         let entries = vec![ManifestEntry {
-            virtual_path: "config.toml".to_string(),
-            backend_path: PathBuf::from("/ext/project/config.toml"),
+            virtual_path: Utf8PathBuf::from("config.toml"),
+            backend_path: Utf8PathBuf::from("/ext/project/config.toml"),
             is_dir: false,
         }];
 
@@ -653,13 +665,13 @@ mod tests {
 
         let entries = vec![
             ManifestEntry {
-                virtual_path: "".to_string(),
-                backend_path: root.clone(),
+                virtual_path: Utf8PathBuf::new(),
+                backend_path: utf8(&root),
                 is_dir: true,
             },
             ManifestEntry {
-                virtual_path: "vendor".to_string(),
-                backend_path: PathBuf::from("/opt/vendor"),
+                virtual_path: Utf8PathBuf::from("vendor"),
+                backend_path: Utf8PathBuf::from("/opt/vendor"),
                 is_dir: true,
             },
         ];
@@ -698,12 +710,12 @@ mod tests {
 
         let mount_roots = vec![
             MountRoot {
-                virtual_prefix: "".to_string(),
-                backend_path: backend_a.clone(),
+                virtual_prefix: Utf8PathBuf::new(),
+                backend_path: utf8(&backend_a),
             },
             MountRoot {
-                virtual_prefix: "".to_string(),
-                backend_path: backend_b.clone(),
+                virtual_prefix: Utf8PathBuf::new(),
+                backend_path: utf8(&backend_b),
             },
         ];
 
@@ -723,7 +735,7 @@ mod tests {
 
         // nonexistent → fallback
         let p = manifest.resolve_paths("missing.txt");
-        assert_eq!(p.display, root.join("missing.txt"));
+        assert_eq!(p.display, utf8(&root.join("missing.txt")));
 
         drop(root_fd);
         std::fs::remove_dir_all(&root).unwrap();
@@ -749,12 +761,12 @@ mod tests {
 
         let mount_roots = vec![
             MountRoot {
-                virtual_prefix: "".to_string(),
-                backend_path: backend_a.clone(),
+                virtual_prefix: Utf8PathBuf::new(),
+                backend_path: utf8(&backend_a),
             },
             MountRoot {
-                virtual_prefix: "".to_string(),
-                backend_path: backend_b.clone(),
+                virtual_prefix: Utf8PathBuf::new(),
+                backend_path: utf8(&backend_b),
             },
         ];
 
@@ -783,8 +795,8 @@ mod tests {
         let raw_fd = root_fd.as_raw_fd();
 
         let mount_roots = vec![MountRoot {
-            virtual_prefix: "vendor".to_string(),
-            backend_path: vendor_dir.clone(),
+            virtual_prefix: Utf8PathBuf::from("vendor"),
+            backend_path: utf8(&vendor_dir),
         }];
 
         let manifest = Manifest::from_entries(root.clone(), raw_fd, vec![], mount_roots);
@@ -794,7 +806,7 @@ mod tests {
 
         // Path outside prefix → fallback
         let p = manifest.resolve_paths("other.txt");
-        assert_eq!(p.display, root.join("other.txt"));
+        assert_eq!(p.display, utf8(&root.join("other.txt")));
 
         drop(root_fd);
         std::fs::remove_dir_all(&root).unwrap();

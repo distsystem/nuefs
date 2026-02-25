@@ -53,8 +53,8 @@ class MountEntry(pydantic.BaseModel):
     def resolve(self, root: pathlib.Path) -> dict[str, ManifestEntry]:
         """Resolve this mount entry into ManifestEntry mappings."""
         return {
-            vpath: ManifestEntry(
-                virtual_path=vpath,
+            str(pathlib.PurePosixPath(vpath)): ManifestEntry(
+                virtual_path=pathlib.PurePosixPath(vpath),
                 backend_path=path,
                 is_dir=is_dir,
             )
@@ -64,7 +64,7 @@ class MountEntry(pydantic.BaseModel):
     def mount_root(self, root: pathlib.Path) -> MountRoot:
         """Return the MountRoot for this entry resolved against *root*."""
         source, prefix, _ = self._resolve_source(root)
-        return MountRoot(virtual_prefix=prefix, backend_path=source)
+        return MountRoot(virtual_prefix=pathlib.PurePosixPath(prefix), backend_path=source)
 
     def _is_excluded(self, name: str, *, is_dir: bool = False) -> bool:
         path = f"{name}/" if is_dir else name

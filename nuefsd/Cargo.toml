@@ -10,6 +10,7 @@ name = "nuefs_rs"
 name = "nuefsd"
 
 [dependencies]
+camino = { version = "1", features = ["serde1"] }
 prost = "0.13"
 serde = { version = "1", features = ["derive"] }
 fuser = "0.16"

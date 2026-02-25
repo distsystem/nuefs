@@ -1,5 +1,7 @@
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
+
+use camino::Utf8PathBuf;
 use std::sync::Arc;
 
 use prost::Message;
@@ -122,7 +124,8 @@ async fn handle_request(
             debug!("RPC daemon_info");
             let info = DaemonInfo {
                 pid: std::process::id(),
-                socket: socket_path.clone(),
+                socket: Utf8PathBuf::from_path_buf(socket_path.clone())
+                    .expect("socket path is not valid UTF-8"),
                 started_at,
             };
             ok_response(ok_payload::Value::DaemonInfo(proto::DaemonInfo::from(&info)))

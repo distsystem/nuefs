@@ -24,13 +24,13 @@ from nuefs._proto.nuefs import (
 
 @dataclasses.dataclass
 class ManifestEntry:
-    virtual_path: str
+    virtual_path: pathlib.PurePosixPath
     backend_path: pathlib.Path
     is_dir: bool
 
     def _to_proto(self) -> ProtoEntry:
         return ProtoEntry(
-            virtual_path=self.virtual_path,
+            virtual_path=str(self.virtual_path),
             backend_path=str(self.backend_path),
             is_dir=self.is_dir,
         )
@@ -38,12 +38,12 @@ class ManifestEntry:
 
 @dataclasses.dataclass
 class MountRoot:
-    virtual_prefix: str
+    virtual_prefix: pathlib.PurePosixPath
     backend_path: pathlib.Path
 
     def _to_proto(self) -> ProtoMount:
         return ProtoMount(
-            virtual_prefix=self.virtual_prefix,
+            virtual_prefix=str(self.virtual_prefix),
             backend_path=str(self.backend_path),
         )
 
