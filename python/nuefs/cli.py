@@ -16,8 +16,8 @@ from nuefs.core import ManifestEntry
 console = rich.get_console()
 
 from nuefs import gitdir as gitdir_mod
+from nuefs.gitconfig import NueGitConfig
 from nuefs.manifest import Gitnue, MountEntry
-from nuefs.sources import resolve_sources
 
 
 def _lazy_unmount(root: pathlib.Path) -> None:
@@ -52,15 +52,16 @@ class Mount(BaseSettings):
     def run(self) -> None:
         gitnue, root = Gitnue.load(path=self.manifest)
 
-        resolved_src = resolve_sources(gitnue, root) if gitnue.sources else None
+        config = NueGitConfig.from_repo(root)
+        resolved_src = gitnue.resolve_sources(root, config)
 
-        sources = list(gitnue.resolve_mounts(root, resolved_src))
+        sources = list(gitnue.resolve_mounts(resolved_src))
         entries: dict[str, nuefs.ManifestEntry] = {}
         mount_roots: list[nuefs.MountRoot] = []
         external_vpaths: set[str] = set()
         for mount_entry, resolved in sources:
             entries.update(resolved)
-            mr = mount_entry.mount_root(root, resolved_src)
+            mr = mount_entry.mount_root(resolved_src[mount_entry.source])
             mount_roots.append(mr)
             if mr.backend_path != root:
                 for vpath in resolved:

@@ -3,6 +3,8 @@
 import shutil
 from pathlib import Path
 
+import yaml
+
 WORKSPACE_ROOT = Path("/tmp/nue-test")
 FIXTURES_DIR = Path(__file__).parent.parent / "tests" / "fixtures"
 
@@ -84,13 +86,14 @@ def setup_workspace(fixture: str = ".gitnue") -> Path:
 
     shutil.copy(fixture_path, workspace / ".gitnue")
 
-    # The fixture manifests use ./sources/*, but this helper creates sources as a
-    # sibling of workspace (../sources/*). Rewrite sources so `git nue mount` works
-    # out of the box.
+    # The fixture manifests use ./sources/* paths, but this helper creates sources
+    # as a sibling of workspace (../sources/*). Rewrite path sources at YAML level.
     manifest_path = workspace / ".gitnue"
-    manifest_text = manifest_path.read_text()
-    manifest_text = manifest_text.replace("source: ./sources/", "source: ../sources/")
-    manifest_path.write_text(manifest_text)
+    data = yaml.safe_load(manifest_path.read_text()) or {}
+    for src_def in (data.get("sources") or {}).values():
+        if "path" in src_def:
+            src_def["path"] = src_def["path"].replace("./sources/", "../sources/")
+    manifest_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
 
     return workspace
 

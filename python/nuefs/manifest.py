@@ -1,17 +1,22 @@
 """NueFS manifest models (.gitnue)."""
 
 import collections.abc
+import logging
 import os
 import pathlib
 import typing
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 import pathspec as _pathspec
-import pygit2
 import pydantic
+import pygit2
 import yaml
+from pydantic import Discriminator, Field, Tag
 
 from nuefs.core import ManifestEntry, MountRoot
+from nuefs.gitconfig import NueGitConfig
+
+logger = logging.getLogger(__name__)
 
 type Pathable = str | os.PathLike[str]
 
@@ -39,13 +44,71 @@ DEFAULT_EXCLUDE = Pathspec(
 )
 
 
-class Source(pydantic.BaseModel):
-    """A named git source definition."""
+# ---------------------------------------------------------------------------
+# Source types (discriminated union)
+# ---------------------------------------------------------------------------
 
+
+class PathSource(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    path: pathlib.Path
+
+    def resolve(self, repo_root: pathlib.Path) -> pathlib.Path:
+        p = self.path.expanduser()
+        if not p.is_absolute():
+            return (repo_root / p).resolve()
+        return p.resolve()
+
+
+class GitSource(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
 
     url: str
     ref: str = "HEAD"
+
+    def resolve(self, name: str, cache_dir: pathlib.Path) -> pathlib.Path:
+        clone_path = cache_dir / name
+        if clone_path.is_dir():
+            self._checkout(clone_path)
+            logger.info("source %s: cached at %s", name, clone_path)
+            return clone_path
+        return self._clone(name, cache_dir)
+
+    def _checkout(self, repo_path: pathlib.Path) -> None:
+        if self.ref == "HEAD":
+            return
+        repo = pygit2.Repository(str(repo_path))
+        target = repo.revparse_single(self.ref)
+        if target.type == pygit2.GIT_OBJECT_TAG:
+            target = target.peel(pygit2.Commit)
+        repo.checkout_tree(target)
+        repo.set_head(target.id)
+
+    def _clone(self, name: str, cache_dir: pathlib.Path) -> pathlib.Path:
+        dest = cache_dir / name
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("source %s: cloning %s", name, self.url)
+        pygit2.clone_repository(self.url, str(dest))
+        self._checkout(dest)
+        return dest
+
+
+def _source_discriminator(v: Any) -> str:
+    if isinstance(v, dict):
+        return "path" if "path" in v else "git"
+    return "path" if isinstance(v, PathSource) else "git"
+
+
+type Source = Annotated[
+    Annotated[PathSource, Tag("path")] | Annotated[GitSource, Tag("git")],
+    Discriminator(_source_discriminator),
+]
+
+
+# ---------------------------------------------------------------------------
+# MountEntry
+# ---------------------------------------------------------------------------
 
 
 class MountEntry(pydantic.BaseModel):
@@ -55,78 +118,42 @@ class MountEntry(pydantic.BaseModel):
 
     source: str
     to: str = ""
-    from_: str = pydantic.Field(default="", alias="from")
-    exclude: Pathspec = pydantic.Field(default=DEFAULT_EXCLUDE)
-    include: Pathspec = pydantic.Field(default_factory=Pathspec)
+    from_: str = Field(default="", alias="from")
+    exclude: Pathspec = Field(default=DEFAULT_EXCLUDE)
+    include: Pathspec = Field(default_factory=Pathspec)
     gitignore: bool = True
 
-    def resolve(
-        self,
-        root: pathlib.Path,
-        resolved_sources: dict[str, pathlib.Path] | None = None,
-    ) -> dict[str, ManifestEntry]:
-        """Resolve this mount entry into ManifestEntry mappings."""
+    def resolve(self, source_path: pathlib.Path) -> dict[str, ManifestEntry]:
         return {
             str(pathlib.PurePosixPath(vpath)): ManifestEntry(
                 virtual_path=pathlib.PurePosixPath(vpath),
                 backend_path=path,
                 is_dir=is_dir,
             )
-            for vpath, path, is_dir in self._iter_entries(root, resolved_sources)
+            for vpath, path, is_dir in self._iter_entries(source_path)
         }
 
-    def mount_root(
-        self,
-        root: pathlib.Path,
-        resolved_sources: dict[str, pathlib.Path] | None = None,
-    ) -> MountRoot:
-        """Return the MountRoot for this entry resolved against *root*."""
-        source, prefix, _ = self._resolve_source(root, resolved_sources)
+    def mount_root(self, source_path: pathlib.Path) -> MountRoot:
+        source, prefix = self._apply_transform(source_path)
         return MountRoot(virtual_prefix=pathlib.PurePosixPath(prefix), backend_path=source)
 
     def _is_excluded(self, name: str, *, is_dir: bool = False) -> bool:
         path = f"{name}/" if is_dir else name
         return self.exclude.match(path) and not self.include.match(path)
 
-    def _resolve_source(
-        self,
-        root: pathlib.Path,
-        resolved_sources: dict[str, pathlib.Path] | None = None,
-    ) -> tuple[pathlib.Path, str, bool]:
-        """Return (resolved_source, prefix, expand_contents)."""
-        raw = self.source.strip()
-
-        # Named source: look up in resolved_sources dict
-        if resolved_sources and raw in resolved_sources:
-            source = resolved_sources[raw]
-            if self.from_:
-                source = source / self.from_.strip().strip("/")
-            expand_contents = True
-            prefix = self.to.strip().strip("/") if self.to else ""
-            return source, prefix, expand_contents
-
-        # Direct path (original behavior)
-        expand_contents = raw.endswith("/") or raw in (".", "./")
-
-        source = pathlib.Path(raw).expanduser()
-        if not source.is_absolute():
-            source = (root / source).resolve()
-        else:
-            source = source.resolve()
-
-        if self.to:
-            prefix = self.to.strip().strip("/")
-        elif expand_contents or source.is_file():
-            prefix = ""
-        else:
-            prefix = source.name
-
-        return source, prefix, expand_contents
+    def _apply_transform(
+        self, source_path: pathlib.Path,
+    ) -> tuple[pathlib.Path, str]:
+        """Apply from_/to to a resolved source path."""
+        source = source_path
+        if self.from_:
+            source = source / self.from_.strip().strip("/")
+        prefix = self.to.strip().strip("/") if self.to else ""
+        return source, prefix
 
     def _list_items(
         self, source: pathlib.Path,
     ) -> list[tuple[pathlib.Path, str, bool]]:
-        """List non-excluded top-level items under *source*, respecting gitignore when gitignore=True."""
         repo: pygit2.Repository | None = None
         if self.gitignore:
             try:
@@ -145,12 +172,9 @@ class MountEntry(pydantic.BaseModel):
         return items
 
     def _iter_entries(
-        self,
-        root: pathlib.Path,
-        resolved_sources: dict[str, pathlib.Path] | None = None,
+        self, source_path: pathlib.Path,
     ) -> collections.abc.Iterator[tuple[str, pathlib.Path, bool]]:
-        """Yield (vpath, backend_path, is_dir) for all resolved entries."""
-        source, prefix, expand_contents = self._resolve_source(root, resolved_sources)
+        source, prefix = self._apply_transform(source_path)
 
         if not source.exists():
             return
@@ -161,21 +185,31 @@ class MountEntry(pydantic.BaseModel):
                 yield vpath, source, False
             return
 
-        if not expand_contents:
-            yield prefix, source, True
-            return
-
         for path, name, is_dir in self._list_items(source):
             vpath = f"{prefix}/{name}" if prefix else name
             yield vpath, path, is_dir
+
+
+# ---------------------------------------------------------------------------
+# Gitnue (top-level manifest)
+# ---------------------------------------------------------------------------
 
 
 class Gitnue(pydantic.BaseModel):
     """NueFS manifest (.gitnue)."""
 
     version: Literal[1] = 1
-    sources: dict[str, Source] = pydantic.Field(default_factory=dict)
-    mounts: list[MountEntry] = pydantic.Field(default_factory=list)
+    sources: dict[str, Source] = Field(default_factory=dict)
+    mounts: list[MountEntry] = Field(default_factory=list)
+
+    @pydantic.model_validator(mode="after")
+    def _validate_mount_sources(self) -> Self:
+        known = set(self.sources)
+        for mount in self.mounts:
+            if mount.source not in known:
+                msg = f"unknown source: {mount.source!r}"
+                raise ValueError(msg)
+        return self
 
     @classmethod
     def load(
@@ -187,13 +221,51 @@ class Gitnue(pydantic.BaseModel):
         data = yaml.safe_load(resolved.read_text()) or {}
         return cls.model_validate(data), resolved.parent
 
+    def resolve_sources(
+        self,
+        repo_root: pathlib.Path,
+        config: NueGitConfig | None = None,
+    ) -> dict[str, pathlib.Path]:
+        """Resolve all named sources: dev path -> env override -> cached clone -> git clone."""
+        cache_dir = repo_root / ".git" / "nue" / "sources"
+        result: dict[str, pathlib.Path] = {}
+
+        for name, source in self.sources.items():
+            # 1. Dev path override (lazy.nvim-style)
+            if config and config.dev:
+                dev_dir = config.dev.path / name
+                if dev_dir.is_dir():
+                    logger.info("source %s: dev override %s", name, dev_dir)
+                    result[name] = dev_dir
+                    continue
+                if not config.dev.fallback:
+                    msg = f"dev source {name!r} not found at {dev_dir} and fallback=false"
+                    raise FileNotFoundError(msg)
+
+            # 2. Env var override: NUE_<UPPER_NAME>=/local/path
+            env_key = f"NUE_{name.upper().replace('-', '_')}"
+            env_val = os.environ.get(env_key)
+            if env_val:
+                path = pathlib.Path(env_val).expanduser().resolve()
+                logger.info("source %s: env override %s=%s", name, env_key, path)
+                result[name] = path
+                continue
+
+            # 3. Resolve by source type
+            match source:
+                case GitSource():
+                    result[name] = source.resolve(name, cache_dir)
+                case PathSource():
+                    result[name] = source.resolve(repo_root)
+
+        return result
+
     def resolve_mounts(
         self,
-        root: pathlib.Path,
-        resolved_sources: dict[str, pathlib.Path] | None = None,
+        resolved: dict[str, pathlib.Path],
     ) -> collections.abc.Iterator[tuple[MountEntry, dict[str, ManifestEntry]]]:
-        root = root.expanduser().resolve()
         for mount in self.mounts:
-            resolved = mount.resolve(root, resolved_sources)
-            if resolved:
-                yield mount, resolved
+            source_path = resolved[mount.source]
+            entries = mount.resolve(source_path)
+            if entries:
+                yield mount, entries

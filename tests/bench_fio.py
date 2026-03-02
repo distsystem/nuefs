@@ -12,8 +12,11 @@ from tests.nue_mount import mount
 
 GITNUE_CONTENT = """\
 version: 1
+sources:
+  data:
+    path: ./data/
 mounts:
-- source: ./data/
+- source: data
   gitignore: false
 """
 

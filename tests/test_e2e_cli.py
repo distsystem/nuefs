@@ -17,12 +17,17 @@ pytestmark = [
 
 GITNUE_CONTENT = """\
 version: 1
+sources:
+  project-a:
+    path: ./project-a/
+  libs:
+    path: ./libs/
 mounts:
-- source: ./project-a/
+- source: project-a
   exclude:
     - __pycache__
   gitignore: false
-- source: ./libs/
+- source: libs
   to: vendor
   gitignore: false
 """
@@ -62,8 +67,11 @@ class TestCLIMount:
 
 GIT_GITNUE = """\
 version: 1
+sources:
+  external:
+    path: ./external/
 mounts:
-- source: ./external/
+- source: external
   to: vendor
   gitignore: false
 """

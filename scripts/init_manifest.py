@@ -4,21 +4,25 @@ from pathlib import Path
 
 import yaml
 
-from nuefs.manifest import Gitnue, MountEntry
+from nuefs.manifest import Gitnue, MountEntry, PathSource
 
 
 def create_example_gitnue() -> Gitnue:
     """Create an example manifest with common defaults."""
     return Gitnue(
+        sources={
+            "example": PathSource(path=Path("~/repos/example")),
+            "lib": PathSource(path=Path("~/local/lib")),
+        },
         mounts=[
             MountEntry(
-                source="~/repos/example",
+                source="example",
                 to=".",
                 exclude=["*.pyc", "__pycache__/", ".git/"],
                 include=["src/", "tests/"],
             ),
             MountEntry(
-                source="~/local/lib",
+                source="lib",
                 to="vendor/lib",
             ),
         ],
