@@ -28,7 +28,7 @@ mounts:
     - __pycache__
   gitignore: false
 - source: libs
-  to: vendor
+  prefix: vendor
   gitignore: false
 """
 
@@ -72,7 +72,7 @@ sources:
     path: ./external/
 mounts:
 - source: external
-  to: vendor
+  prefix: vendor
   gitignore: false
 """
 

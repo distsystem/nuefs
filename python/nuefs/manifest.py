@@ -18,9 +18,6 @@ from nuefs.gitconfig import NueGitConfig
 
 logger = logging.getLogger(__name__)
 
-type Pathable = str | os.PathLike[str]
-
-
 class Pathspec(pydantic.RootModel[list[str]]):
     """Gitignore-style pattern list with matching capabilities."""
 
@@ -30,10 +27,7 @@ class Pathspec(pydantic.RootModel[list[str]]):
     def model_post_init(self, __context: Any) -> None:
         self._spec = _pathspec.PathSpec.from_lines("gitignore", self.root)
 
-    def __len__(self) -> int:
-        return len(self.root)
-
-    def match(self, path: Pathable) -> bool:
+    def match(self, path: str | os.PathLike[str]) -> bool:
         if not self.root:
             return False
         return bool(self._spec.match_file(str(path)))
@@ -117,43 +111,27 @@ class MountEntry(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
 
     source: str
-    to: str = ""
-    from_: str = Field(default="", alias="from")
+    root: str = ""
+    prefix: str = ""
     exclude: Pathspec = Field(default=DEFAULT_EXCLUDE)
     include: Pathspec = Field(default_factory=Pathspec)
     gitignore: bool = True
 
     def resolve(self, source_path: pathlib.Path) -> dict[str, ManifestEntry]:
-        return {
-            str(pathlib.PurePosixPath(vpath)): ManifestEntry(
-                virtual_path=pathlib.PurePosixPath(vpath),
-                backend_path=path,
-                is_dir=is_dir,
-            )
-            for vpath, path, is_dir in self._iter_entries(source_path)
-        }
-
-    def mount_root(self, source_path: pathlib.Path) -> MountRoot:
         source, prefix = self._apply_transform(source_path)
-        return MountRoot(virtual_prefix=pathlib.PurePosixPath(prefix), backend_path=source)
 
-    def _is_excluded(self, name: str, *, is_dir: bool = False) -> bool:
-        path = f"{name}/" if is_dir else name
-        return self.exclude.match(path) and not self.include.match(path)
+        if not source.exists():
+            return {}
 
-    def _apply_transform(
-        self, source_path: pathlib.Path,
-    ) -> tuple[pathlib.Path, str]:
-        """Apply from_/to to a resolved source path."""
-        source = source_path
-        if self.from_:
-            source = source / self.from_.strip().strip("/")
-        prefix = self.to.strip().strip("/") if self.to else ""
-        return source, prefix
+        # Single file
+        if source.is_file():
+            vpath = prefix if prefix else source.name
+            if self.exclude.match(vpath) and not self.include.match(vpath):
+                return {}
+            vp = pathlib.PurePosixPath(vpath)
+            return {str(vp): ManifestEntry(virtual_path=vp, backend_path=source, is_dir=False)}
 
-    def _list_items(
-        self, source: pathlib.Path,
-    ) -> list[tuple[pathlib.Path, str, bool]]:
+        # Directory
         repo: pygit2.Repository | None = None
         if self.gitignore:
             try:
@@ -161,33 +139,31 @@ class MountEntry(pydantic.BaseModel):
             except pygit2.GitError:
                 pass
 
-        items: list[tuple[pathlib.Path, str, bool]] = []
+        entries: dict[str, ManifestEntry] = {}
         for item in source.iterdir():
             is_dir = item.is_dir() and not item.is_symlink()
             path_arg = f"{item.name}/" if is_dir else item.name
             if repo is not None and repo.path_is_ignored(path_arg):
                 continue
-            if not self._is_excluded(item.name, is_dir=is_dir):
-                items.append((item, item.name, is_dir))
-        return items
+            if self.exclude.match(path_arg) and not self.include.match(path_arg):
+                continue
+            vpath = f"{prefix}/{item.name}" if prefix else item.name
+            vp = pathlib.PurePosixPath(vpath)
+            entries[str(vp)] = ManifestEntry(virtual_path=vp, backend_path=item, is_dir=is_dir)
+        return entries
 
-    def _iter_entries(
-        self, source_path: pathlib.Path,
-    ) -> collections.abc.Iterator[tuple[str, pathlib.Path, bool]]:
+    def mount_root(self, source_path: pathlib.Path) -> MountRoot:
         source, prefix = self._apply_transform(source_path)
+        return MountRoot(virtual_prefix=pathlib.PurePosixPath(prefix), backend_path=source)
 
-        if not source.exists():
-            return
-
-        if source.is_file():
-            vpath = prefix if prefix else source.name
-            if not self._is_excluded(vpath):
-                yield vpath, source, False
-            return
-
-        for path, name, is_dir in self._list_items(source):
-            vpath = f"{prefix}/{name}" if prefix else name
-            yield vpath, path, is_dir
+    def _apply_transform(
+        self, source_path: pathlib.Path,
+    ) -> tuple[pathlib.Path, str]:
+        source = source_path
+        if self.root:
+            source = source / self.root.strip().strip("/")
+        prefix = self.prefix.strip().strip("/") if self.prefix else ""
+        return source, prefix
 
 
 # ---------------------------------------------------------------------------
