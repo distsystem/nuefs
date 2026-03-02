@@ -10,8 +10,8 @@ import tempfile
 
 from tests.nue_mount import mount
 
-YAML_CONTENT = """\
-apiVersion: nue/v1
+GITNUE_CONTENT = """\
+version: 1
 mounts:
 - source: ./data/
   gitignore: false
@@ -38,7 +38,7 @@ def _check_prereqs() -> None:
     missing = []
     if not pathlib.Path("/dev/fuse").exists():
         missing.append("/dev/fuse")
-    for cmd in ("nuefsd", "nue", "fio", "findmnt"):
+    for cmd in ("nuefsd", "git-nue", "fio", "findmnt"):
         if shutil.which(cmd) is None:
             missing.append(cmd)
     if missing:
@@ -75,7 +75,7 @@ def main() -> None:
         root = pathlib.Path(tmpdir)
         (root / "data").mkdir()
         (root / "data" / "seed.bin").write_bytes(os.urandom(1024))
-        (root / "nue.yaml").write_text(YAML_CONTENT)
+        (root / ".gitnue").write_text(GITNUE_CONTENT)
 
         with mount(root):
             print()

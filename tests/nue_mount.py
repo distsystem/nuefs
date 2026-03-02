@@ -36,9 +36,9 @@ def lazy_unmount(root: pathlib.Path) -> None:
 
 @contextlib.contextmanager
 def mount(root: pathlib.Path) -> Iterator[pathlib.Path]:
-    """Mount nuefs at *root* (expects nue.yaml), unmount on exit."""
+    """Mount nuefs at *root* (expects .gitnue), unmount on exit."""
     subprocess.run(
-        ["nue", "mount", "-m", str(root / "nue.yaml")],
+        ["git-nue", "mount", "-m", str(root / ".gitnue")],
         check=True, timeout=15,
     )
     wait_for_mount(root)

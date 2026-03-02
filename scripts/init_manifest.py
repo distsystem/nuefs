@@ -1,33 +1,36 @@
-"""Generate default nue.yaml manifest."""
+"""Generate default .gitnue manifest."""
 
 from pathlib import Path
 
-from nuefs.manifest import Manifest, MountEntry
+import yaml
+
+from nuefs.manifest import Gitnue, MountEntry
 
 
-def create_example_manifest() -> Manifest:
+def create_example_gitnue() -> Gitnue:
     """Create an example manifest with common defaults."""
-    return Manifest(
+    return Gitnue(
         mounts=[
             MountEntry(
                 source="~/repos/example",
-                dest=".",
+                to=".",
                 exclude=["*.pyc", "__pycache__/", ".git/"],
                 include=["src/", "tests/"],
             ),
             MountEntry(
                 source="~/local/lib",
-                dest="vendor/lib",
+                to="vendor/lib",
             ),
         ],
     )
 
 
 def main() -> None:
-    output = Path("nue.yaml")
-    manifest = create_example_manifest()
-    manifest.apiVersion = "nue/v1"
-    manifest.save(output)
+    output = Path(".gitnue")
+    gitnue = create_example_gitnue()
+    data = gitnue.model_dump(mode="json", by_alias=True, exclude_defaults=True)
+    data["version"] = 1
+    output.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
     print(f"Generated {output}")
 
 

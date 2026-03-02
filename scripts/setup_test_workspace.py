@@ -61,15 +61,8 @@ def helper() -> str:
     (override / "override_only.txt").write_text("only in override\n")
 
 
-def setup_workspace(fixture: str = "nue.yaml") -> Path:
-    """Set up test workspace with the specified fixture.
-
-    Args:
-        fixture: Name of the fixture file to use (nue.yaml or nue-multi.yaml)
-
-    Returns:
-        Path to the workspace directory
-    """
+def setup_workspace(fixture: str = ".gitnue") -> Path:
+    """Set up test workspace with the specified fixture."""
     # Clean up existing workspace
     if WORKSPACE_ROOT.exists():
         shutil.rmtree(WORKSPACE_ROOT)
@@ -89,12 +82,12 @@ def setup_workspace(fixture: str = "nue.yaml") -> Path:
         msg = f"Fixture not found: {fixture_path}"
         raise FileNotFoundError(msg)
 
-    shutil.copy(fixture_path, workspace / "nue.yaml")
+    shutil.copy(fixture_path, workspace / ".gitnue")
 
     # The fixture manifests use ./sources/*, but this helper creates sources as a
-    # sibling of workspace (../sources/*). Rewrite sources so `nue mount` works
+    # sibling of workspace (../sources/*). Rewrite sources so `git nue mount` works
     # out of the box.
-    manifest_path = workspace / "nue.yaml"
+    manifest_path = workspace / ".gitnue"
     manifest_text = manifest_path.read_text()
     manifest_text = manifest_text.replace("source: ./sources/", "source: ../sources/")
     manifest_path.write_text(manifest_text)
@@ -108,9 +101,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Set up NueFS test workspace")
     parser.add_argument(
         "--fixture",
-        default="nue.yaml",
-        choices=["nue.yaml", "nue-multi.yaml"],
-        help="Fixture file to use (default: nue.yaml)",
+        default=".gitnue",
+        help="Fixture file to use (default: .gitnue)",
     )
     args = parser.parse_args()
 
@@ -123,7 +115,7 @@ def main() -> None:
     print("Directory structure:")
     print(f"  {WORKSPACE_ROOT}/")
     print(f"  ├── workspace/")
-    print(f"  │   └── nue.yaml")
+    print(f"  │   └── .gitnue")
     print(f"  └── sources/")
     print(f"      ├── project-a/")
     print(f"      │   ├── src/main.py")
@@ -137,7 +129,7 @@ def main() -> None:
     print(f"          └── override_only.txt")
     print()
     print("To test mounting:")
-    print(f"  cd {workspace} && pixi run nuefs mount .")
+    print(f"  cd {workspace} && pixi run git-nue mount .")
 
 
 if __name__ == "__main__":

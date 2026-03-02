@@ -1,4 +1,4 @@
-"""NueFS manifest models (nue.yaml)."""
+"""NueFS manifest models (.gitnue)."""
 
 import collections.abc
 import os
@@ -39,18 +39,32 @@ DEFAULT_EXCLUDE = Pathspec(
 )
 
 
+class Source(pydantic.BaseModel):
+    """A named git source definition."""
+
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    url: str
+    ref: str = "HEAD"
+
+
 class MountEntry(pydantic.BaseModel):
     """A single mount entry in the manifest."""
 
     model_config = pydantic.ConfigDict(extra="forbid")
 
     source: str
-    dest: str = ""
+    to: str = ""
+    from_: str = pydantic.Field(default="", alias="from")
     exclude: Pathspec = pydantic.Field(default=DEFAULT_EXCLUDE)
     include: Pathspec = pydantic.Field(default_factory=Pathspec)
     gitignore: bool = True
 
-    def resolve(self, root: pathlib.Path) -> dict[str, ManifestEntry]:
+    def resolve(
+        self,
+        root: pathlib.Path,
+        resolved_sources: dict[str, pathlib.Path] | None = None,
+    ) -> dict[str, ManifestEntry]:
         """Resolve this mount entry into ManifestEntry mappings."""
         return {
             str(pathlib.PurePosixPath(vpath)): ManifestEntry(
@@ -58,12 +72,16 @@ class MountEntry(pydantic.BaseModel):
                 backend_path=path,
                 is_dir=is_dir,
             )
-            for vpath, path, is_dir in self._iter_entries(root)
+            for vpath, path, is_dir in self._iter_entries(root, resolved_sources)
         }
 
-    def mount_root(self, root: pathlib.Path) -> MountRoot:
+    def mount_root(
+        self,
+        root: pathlib.Path,
+        resolved_sources: dict[str, pathlib.Path] | None = None,
+    ) -> MountRoot:
         """Return the MountRoot for this entry resolved against *root*."""
-        source, prefix, _ = self._resolve_source(root)
+        source, prefix, _ = self._resolve_source(root, resolved_sources)
         return MountRoot(virtual_prefix=pathlib.PurePosixPath(prefix), backend_path=source)
 
     def _is_excluded(self, name: str, *, is_dir: bool = False) -> bool:
@@ -73,9 +91,21 @@ class MountEntry(pydantic.BaseModel):
     def _resolve_source(
         self,
         root: pathlib.Path,
+        resolved_sources: dict[str, pathlib.Path] | None = None,
     ) -> tuple[pathlib.Path, str, bool]:
         """Return (resolved_source, prefix, expand_contents)."""
         raw = self.source.strip()
+
+        # Named source: look up in resolved_sources dict
+        if resolved_sources and raw in resolved_sources:
+            source = resolved_sources[raw]
+            if self.from_:
+                source = source / self.from_.strip().strip("/")
+            expand_contents = True
+            prefix = self.to.strip().strip("/") if self.to else ""
+            return source, prefix, expand_contents
+
+        # Direct path (original behavior)
         expand_contents = raw.endswith("/") or raw in (".", "./")
 
         source = pathlib.Path(raw).expanduser()
@@ -84,8 +114,8 @@ class MountEntry(pydantic.BaseModel):
         else:
             source = source.resolve()
 
-        if self.dest:
-            prefix = self.dest.strip().strip("/")
+        if self.to:
+            prefix = self.to.strip().strip("/")
         elif expand_contents or source.is_file():
             prefix = ""
         else:
@@ -117,9 +147,10 @@ class MountEntry(pydantic.BaseModel):
     def _iter_entries(
         self,
         root: pathlib.Path,
+        resolved_sources: dict[str, pathlib.Path] | None = None,
     ) -> collections.abc.Iterator[tuple[str, pathlib.Path, bool]]:
         """Yield (vpath, backend_path, is_dir) for all resolved entries."""
-        source, prefix, expand_contents = self._resolve_source(root)
+        source, prefix, expand_contents = self._resolve_source(root, resolved_sources)
 
         if not source.exists():
             return
@@ -139,27 +170,30 @@ class MountEntry(pydantic.BaseModel):
             yield vpath, path, is_dir
 
 
-class Manifest(pydantic.BaseModel):
-    """NueFS manifest (nue.yaml)."""
+class Gitnue(pydantic.BaseModel):
+    """NueFS manifest (.gitnue)."""
 
-    apiVersion: Literal["nue/v1"] = "nue/v1"
+    version: Literal[1] = 1
+    sources: dict[str, Source] = pydantic.Field(default_factory=dict)
     mounts: list[MountEntry] = pydantic.Field(default_factory=list)
 
     @classmethod
     def load(
-        cls, path: pathlib.Path = pathlib.Path("nue.yaml"),
+        cls, path: pathlib.Path = pathlib.Path(".gitnue"),
     ) -> tuple[typing.Self, pathlib.Path]:
         resolved = path.expanduser().resolve()
         if resolved.is_dir():
-            resolved = resolved / "nue.yaml"
+            resolved = resolved / ".gitnue"
         data = yaml.safe_load(resolved.read_text()) or {}
         return cls.model_validate(data), resolved.parent
 
     def resolve_mounts(
-        self, root: pathlib.Path,
+        self,
+        root: pathlib.Path,
+        resolved_sources: dict[str, pathlib.Path] | None = None,
     ) -> collections.abc.Iterator[tuple[MountEntry, dict[str, ManifestEntry]]]:
         root = root.expanduser().resolve()
         for mount in self.mounts:
-            resolved = mount.resolve(root)
+            resolved = mount.resolve(root, resolved_sources)
             if resolved:
                 yield mount, resolved

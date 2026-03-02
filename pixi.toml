@@ -53,7 +53,7 @@ proto = { features = ["proto"], no-default-feature = true }
 [tasks]
 check = "cargo check --manifest-path nuefsd/Cargo.toml"
 kill = "pkill -9 nuefsd || true"
-stop = "nue stop 2>/dev/null || pkill -9 nuefsd || true"
+stop = "git-nue stop 2>/dev/null || pkill -9 nuefsd || true"
 test = "pytest tests -v"
 bench = "python -m tests.bench_fio"
 posixtest = "python -m uposixtest"

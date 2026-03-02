@@ -15,15 +15,15 @@ pytestmark = [
     pytest.mark.skipif(shutil.which("nuefsd") is None, reason="nuefsd not in PATH"),
 ]
 
-YAML_CONTENT = """\
-apiVersion: nue/v1
+GITNUE_CONTENT = """\
+version: 1
 mounts:
 - source: ./project-a/
   exclude:
     - __pycache__
   gitignore: false
 - source: ./libs/
-  dest: vendor
+  to: vendor
   gitignore: false
 """
 
@@ -44,7 +44,7 @@ def setup_test_dirs(root: pathlib.Path) -> None:
 def fuse_workspace(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
     root = tmp_path_factory.mktemp("e2e_cli")
     setup_test_dirs(root)
-    (root / "nue.yaml").write_text(YAML_CONTENT)
+    (root / ".gitnue").write_text(GITNUE_CONTENT)
 
     with mount(root) as workspace:
         yield workspace
@@ -60,11 +60,11 @@ class TestCLIMount:
 # Git-on-FUSE tests
 # ---------------------------------------------------------------------------
 
-GIT_YAML = """\
-apiVersion: nue/v1
+GIT_GITNUE = """\
+version: 1
 mounts:
 - source: ./external/
-  dest: vendor
+  to: vendor
   gitignore: false
 """
 
@@ -87,7 +87,7 @@ def _setup_git_workspace(root: pathlib.Path) -> None:
 def git_workspace(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
     root = tmp_path_factory.mktemp("git_fuse")
     _setup_git_workspace(root)
-    (root / "nue.yaml").write_text(GIT_YAML)
+    (root / ".gitnue").write_text(GIT_GITNUE)
     with mount(root) as ws:
         yield ws
 

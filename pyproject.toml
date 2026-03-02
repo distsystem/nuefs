@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-nue = "nuefs.cli:main"
+git-nue = "nuefs.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["python/nuefs"]

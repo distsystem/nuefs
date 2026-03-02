@@ -46,7 +46,7 @@ def _assert(cond: bool, msg: str) -> None:
 
 
 def main() -> int:
-    _run(["pixi", "run", "nue", "stop"], cwd=REPO_ROOT)
+    _run(["pixi", "run", "git-nue", "stop"], cwd=REPO_ROOT)
 
     try:
         _run(
@@ -54,12 +54,12 @@ def main() -> int:
                 sys.executable,
                 "scripts/setup_test_workspace.py",
                 "--fixture",
-                "nue.yaml",
+                ".gitnue",
             ],
             cwd=REPO_ROOT,
         )
 
-        _run(["pixi", "run", "nue", "mount"], cwd=WORKSPACE)
+        _run(["pixi", "run", "git-nue", "mount"], cwd=WORKSPACE)
         _wait_for_mount(WORKSPACE)
 
         # If we mounted while already inside the mountpoint, re-enter it so the
@@ -139,7 +139,7 @@ def main() -> int:
         print("OK: posix operations behave as expected")
         return 0
     finally:
-        _run(["pixi", "run", "nue", "stop"], cwd=REPO_ROOT)
+        _run(["pixi", "run", "git-nue", "stop"], cwd=REPO_ROOT)
 
 
 if __name__ == "__main__":

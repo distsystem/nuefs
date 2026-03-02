@@ -12,11 +12,11 @@ inputs:
     default: ""
   manifest:
     description: >
-      Path to nue.yaml. When set, runs `nue mount -m <manifest>` after install.
+      Path to .gitnue. When set, runs `git-nue mount -m <manifest>` after install.
     default: ""
   manifest-content:
     description: >
-      Inline nue.yaml content. Written to <mountpoint>/nue.yaml.
+      Inline .gitnue content. Written to <mountpoint>/.gitnue.
       Source paths resolve relative to mountpoint.
       Takes precedence over manifest when both are set.
     default: ""
@@ -92,14 +92,14 @@ runs:
       shell: bash
       env:
         MANIFEST_CONTENT: ${{ inputs.manifest-content }}
-      run: printf '%s\n' "$MANIFEST_CONTENT" > "${{ inputs.mountpoint }}/nue.yaml"
+      run: printf '%s\n' "$MANIFEST_CONTENT" > "${{ inputs.mountpoint }}/.gitnue"
 
     - name: Mount workspace
       if: inputs.manifest != '' || inputs.manifest-content != ''
       shell: bash
       run: |
         if [ -n "${{ inputs.manifest-content }}" ]; then
-          nue mount -m "${{ inputs.mountpoint }}/nue.yaml"
+          git-nue mount -m "${{ inputs.mountpoint }}/.gitnue"
         else
-          nue mount -m "${{ inputs.manifest }}"
+          git-nue mount -m "${{ inputs.manifest }}"
         fi

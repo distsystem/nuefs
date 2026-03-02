@@ -34,7 +34,7 @@ tail -f /run/user/1000/nuefsd.log
 nuefsd --log /tmp/nuefsd-debug.log
 
 # Enable debug logging via RUST_LOG (set before daemon starts)
-RUST_LOG=debug pixi run nue mount
+RUST_LOG=debug pixi run git-nue mount
 ```
 
 Log levels: `error`, `warn`, `info`, `debug`, `trace`
@@ -84,8 +84,9 @@ nuefs/
 │       ├── _ipc.py       # protobuf IPC client
 │       ├── _proto/       # generated betterproto2 code
 │       ├── core.py       # dataclasses + Handle
-│       ├── manifest.py   # manifest parsing
-│       └── cli.py        # CLI (nue mount/unmount/status/stop)
+│       ├── manifest.py   # manifest parsing (.gitnue)
+│       ├── sources.py    # named source resolution
+│       └── cli.py        # CLI (git nue mount/unmount/status/stop/init/add/export/which)
 └── nuefsd/               # Rust daemon (self-contained)
     ├── Cargo.toml
     ├── build.rs          # prost-build proto compilation

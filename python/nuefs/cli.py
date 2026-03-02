@@ -15,8 +15,9 @@ from nuefs.core import ManifestEntry
 
 console = rich.get_console()
 
-from . import gitdir as gitdir_mod
-from .manifest import Manifest, MountEntry
+from nuefs import gitdir as gitdir_mod
+from nuefs.manifest import Gitnue, MountEntry
+from nuefs.sources import resolve_sources
 
 
 def _lazy_unmount(root: pathlib.Path) -> None:
@@ -40,7 +41,7 @@ def _lazy_unmount(root: pathlib.Path) -> None:
 
 class Mount(BaseSettings):
     manifest: pathlib.Path = Field(
-        default=pathlib.Path("nue.yaml"),
+        default=pathlib.Path(".gitnue"),
         validation_alias=AliasChoices("m", "manifest"),
     )
     dry_run: bool = Field(
@@ -49,15 +50,17 @@ class Mount(BaseSettings):
     )
 
     def run(self) -> None:
-        manifest, root = Manifest.load(path=self.manifest)
+        gitnue, root = Gitnue.load(path=self.manifest)
 
-        sources = list(manifest.resolve_mounts(root))
+        resolved_src = resolve_sources(gitnue, root) if gitnue.sources else None
+
+        sources = list(gitnue.resolve_mounts(root, resolved_src))
         entries: dict[str, nuefs.ManifestEntry] = {}
         mount_roots: list[nuefs.MountRoot] = []
         external_vpaths: set[str] = set()
         for mount_entry, resolved in sources:
             entries.update(resolved)
-            mr = mount_entry.mount_root(root)
+            mr = mount_entry.mount_root(root, resolved_src)
             mount_roots.append(mr)
             if mr.backend_path != root:
                 for vpath in resolved:
@@ -78,7 +81,7 @@ class Mount(BaseSettings):
                     "Mount created, but your current shell is already inside the directory.\n"
                     "Re-enter it to see the mounted view:\n\n"
                     "  cd .. && cd -\n",
-                    title="nue mount",
+                    title="git nue mount",
                     border_style="yellow",
                 )
             )
@@ -179,7 +182,7 @@ def _daemon_running(socket_path: pathlib.Path) -> bool:
         return False
 
 
-class Nue(BaseSettings):
+class GitNue(BaseSettings):
     model_config = SettingsConfigDict(cli_parse_args=True, cli_implicit_flags=True)
 
     mount: CliSubCommand[Mount]
@@ -189,7 +192,7 @@ class Nue(BaseSettings):
 
 
 def main() -> int:
-    cmd = get_subcommand(Nue())
+    cmd = get_subcommand(GitNue())
     cmd.run()
     return 0
 
