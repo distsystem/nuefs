@@ -22,10 +22,7 @@ _MARKER_END = "# --- END nuefs ---\n"
 
 
 def resolve_gitdir(worktree: pathlib.Path) -> pathlib.Path | None:
-    """Resolve .git to the actual gitdir path, handling gitdir: indirection.
-
-    Returns None if worktree has no .git.
-    """
+    """Resolve .git to the actual gitdir path, handling gitdir: indirection."""
     git_path = worktree / ".git"
     if not git_path.exists():
         return None

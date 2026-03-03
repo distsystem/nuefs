@@ -41,7 +41,7 @@ def daemon_running(socket_path: pathlib.Path | None = None) -> bool:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.connect(str(sp))
         return True
-    except (FileNotFoundError, ConnectionRefusedError, OSError):
+    except OSError:
         return False
 
 
@@ -87,8 +87,6 @@ def _ensure_daemon(socket_path: pathlib.Path) -> None:
 
 
 class Mount:
-    """Handle to a single mounted NueFS filesystem."""
-
     __slots__ = ("_stub", "_root", "_mount_id")
 
     def __init__(self, stub: NueFsStub, root: str, mount_id: int) -> None:

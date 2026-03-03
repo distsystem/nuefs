@@ -7,6 +7,8 @@ import subprocess
 import time
 from collections.abc import Iterator
 
+from nuefs.cli import _lazy_unmount as lazy_unmount
+
 
 def wait_for_mount(path: pathlib.Path, *, timeout_s: float = 5.0) -> None:
     deadline = time.time() + timeout_s
@@ -20,18 +22,6 @@ def wait_for_mount(path: pathlib.Path, *, timeout_s: float = 5.0) -> None:
         time.sleep(0.05)
     msg = f"mount did not become ready within {timeout_s}s: {path}"
     raise RuntimeError(msg)
-
-
-def lazy_unmount(root: pathlib.Path) -> None:
-    for cmd in ("fusermount3", "fusermount"):
-        try:
-            subprocess.run(
-                [cmd, "-uz", str(root)],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            return
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            continue
 
 
 @contextlib.contextmanager

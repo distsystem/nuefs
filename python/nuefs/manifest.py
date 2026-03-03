@@ -28,19 +28,12 @@ class Pathspec(pydantic.RootModel[list[str]]):
         self._spec = _pathspec.PathSpec.from_lines("gitignore", self.root)
 
     def match(self, path: str | os.PathLike[str]) -> bool:
-        if not self.root:
-            return False
         return bool(self._spec.match_file(str(path)))
 
 # Default excludes: caches, build artifacts, VCS directories
 DEFAULT_EXCLUDE = Pathspec(
     [".git", ".pixi", "node_modules", "__pycache__", ".venv", "target"]
 )
-
-
-# ---------------------------------------------------------------------------
-# Source types (discriminated union)
-# ---------------------------------------------------------------------------
 
 
 class PathSource(pydantic.BaseModel):
@@ -100,14 +93,7 @@ type Source = Annotated[
 ]
 
 
-# ---------------------------------------------------------------------------
-# MountEntry
-# ---------------------------------------------------------------------------
-
-
 class MountEntry(pydantic.BaseModel):
-    """A single mount entry in the manifest."""
-
     model_config = pydantic.ConfigDict(extra="forbid")
 
     source: str
@@ -164,11 +150,6 @@ class MountEntry(pydantic.BaseModel):
         return source, prefix
 
 
-# ---------------------------------------------------------------------------
-# Gitnue (top-level manifest)
-# ---------------------------------------------------------------------------
-
-
 class Gitnue(pydantic.BaseModel):
     """NueFS manifest (.gitnue)."""
 
@@ -200,7 +181,6 @@ class Gitnue(pydantic.BaseModel):
         repo_root: pathlib.Path,
         config: NueGitConfig | None = None,
     ) -> dict[str, pathlib.Path]:
-        """Resolve all named sources: dev path -> env override -> cached clone -> git clone."""
         cache_dir = repo_root / ".git" / "nue" / "sources"
         result: dict[str, pathlib.Path] = {}
 

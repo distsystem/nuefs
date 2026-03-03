@@ -17,8 +17,6 @@ class DevConfig(pydantic.BaseModel):
 
 
 class NueGitConfig(pydantic.BaseModel):
-    """Parsed nue.* git config section."""
-
     dev: DevConfig | None = None
 
     @classmethod

@@ -11,13 +11,11 @@ from rich.panel import Panel
 from rich.tree import Tree
 
 import nuefs
-from nuefs._proto.nuefs import ManifestEntry
-
-console = rich.get_console()
-
 from nuefs import gitdir as gitdir_mod
 from nuefs.gitconfig import NueGitConfig
 from nuefs.manifest import Gitnue, MountEntry
+
+console = rich.get_console()
 
 
 def _lazy_unmount(root: pathlib.Path) -> None:
@@ -96,8 +94,7 @@ class Unmount(BaseSettings):
     )
 
     def run(self) -> None:
-        root_path = self.root.expanduser()
-        root = os.path.normpath(os.path.abspath(os.fspath(root_path)))
+        root = str(self.root.expanduser().resolve())
         os.chdir("/")
 
         socket_path = nuefs.default_socket_path()
@@ -110,7 +107,7 @@ class Unmount(BaseSettings):
 
         client = nuefs.NueFs()
         for mount in client.status():
-            if os.path.normpath(mount.root) == root:
+            if str(pathlib.Path(mount.root).resolve()) == root:
                 mount.unmount()
                 return
 
@@ -149,8 +146,8 @@ class Stop(BaseSettings):
 
 def _print_tree(
     root: pathlib.Path,
-    sources: list[tuple[MountEntry, dict[str, ManifestEntry]]],
-    entries: dict[str, ManifestEntry],
+    sources: list[tuple[MountEntry, dict[str, nuefs.ManifestEntry]]],
+    entries: dict[str, nuefs.ManifestEntry],
 ) -> None:
     source_tree = Tree(f"[bold blue]{root}[/] [dim](sources)[/]")
     for mount_entry, resolved in sources:
@@ -164,7 +161,7 @@ def _print_tree(
     console.print(merged_tree)
 
 
-def _render_entries(root_node: Tree, entries: dict[str, ManifestEntry]) -> None:
+def _render_entries(root_node: Tree, entries: dict[str, nuefs.ManifestEntry]) -> None:
     for entry in sorted(entries.values(), key=lambda e: e.virtual_path):
         vpath = entry.virtual_path
         if entry.is_dir:
