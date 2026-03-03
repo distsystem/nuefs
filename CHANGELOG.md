@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0](https://github.com/distsystem/nuefs/compare/nuefs-v0.2.0...nuefs-v0.3.0) (2026-03-03)
+
+
+### Features
+
+* **cli:** migrate `nue` to `git-nue` (git extension) ([be0a8df](https://github.com/distsystem/nuefs/commit/be0a8dfe7efad51a95bb783aecd188fbf8457457))
+
+
+### Bug Fixes
+
+* **ci:** correct release-please output keys for root package ([316fbe5](https://github.com/distsystem/nuefs/commit/316fbe5cad66675cc7b984936b90156652341f28))
+* **manifest:** include untracked non-ignored files in vcs mode ([c4e9221](https://github.com/distsystem/nuefs/commit/c4e9221d987904a73ce2e2639e6f810d3956a517))
+* **tests:** use -m flag for nue mount config ([72d48c0](https://github.com/distsystem/nuefs/commit/72d48c0fd716eb2ba366fd8bbbd2707e4b8f42e4))
+
 ## [0.2.0](https://github.com/distsystem/nuefs/compare/nuefs-v0.1.0...nuefs-v0.2.0) (2026-02-16)
 
 
