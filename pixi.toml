@@ -6,7 +6,7 @@ preview = ["pixi-build"]
 
 [package]
 name = "nuefs"
-version = "0.2.0" # x-release-please-version
+version = "0.3.0" # x-release-please-version
 
 [package.build.backend]
 name = "pixi-build-python"
