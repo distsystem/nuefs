@@ -6,28 +6,32 @@
 __all__ = (
     "DaemonInfo",
     "DaemonInfoReq",
-    "Empty",
+    "DaemonInfoResp",
     "ManifestEntry",
     "MountReq",
+    "MountResp",
     "MountRoot",
     "MountStatus",
-    "OkPayload",
+    "NueFsStub",
     "OwnerInfo",
-    "Request",
     "ResolveReq",
-    "ResolveResult",
-    "Response",
+    "ResolveResp",
     "ShutdownReq",
-    "StatusList",
+    "ShutdownResp",
     "StatusReq",
+    "StatusResp",
     "UnmountReq",
+    "UnmountResp",
     "UpdateReq",
+    "UpdateResp",
     "WhichReq",
+    "WhichResp",
 )
 
 from dataclasses import dataclass
 
 import betterproto2
+import grpc
 
 from ..message_pool import default_message_pool
 
@@ -56,11 +60,13 @@ default_message_pool.register_message("nuefs", "DaemonInfoReq", DaemonInfoReq)
 
 
 @dataclass(eq=False, repr=False)
-class Empty(betterproto2.Message):
-    pass
+class DaemonInfoResp(betterproto2.Message):
+    info: "DaemonInfo | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
 
 
-default_message_pool.register_message("nuefs", "Empty", Empty)
+default_message_pool.register_message("nuefs", "DaemonInfoResp", DaemonInfoResp)
 
 
 @dataclass(eq=False, repr=False)
@@ -81,6 +87,10 @@ default_message_pool.register_message("nuefs", "ManifestEntry", ManifestEntry)
 
 @dataclass(eq=False, repr=False)
 class MountReq(betterproto2.Message):
+    """
+    -- Requests --
+    """
+
     root: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
     entries: "list[ManifestEntry]" = betterproto2.field(
@@ -93,6 +103,18 @@ class MountReq(betterproto2.Message):
 
 
 default_message_pool.register_message("nuefs", "MountReq", MountReq)
+
+
+@dataclass(eq=False, repr=False)
+class MountResp(betterproto2.Message):
+    """
+    -- Responses --
+    """
+
+    mount_id: "int" = betterproto2.field(1, betterproto2.TYPE_UINT64)
+
+
+default_message_pool.register_message("nuefs", "MountResp", MountResp)
 
 
 @dataclass(eq=False, repr=False)
@@ -116,43 +138,6 @@ default_message_pool.register_message("nuefs", "MountStatus", MountStatus)
 
 
 @dataclass(eq=False, repr=False)
-class OkPayload(betterproto2.Message):
-    """
-
-
-    Oneofs:
-        - value:
-    """
-
-    mount_id: "int | None" = betterproto2.field(
-        1, betterproto2.TYPE_UINT64, optional=True, group="value"
-    )
-
-    owner_info: "OwnerInfo | None" = betterproto2.field(
-        2, betterproto2.TYPE_MESSAGE, optional=True, group="value"
-    )
-
-    status: "StatusList | None" = betterproto2.field(
-        3, betterproto2.TYPE_MESSAGE, optional=True, group="value"
-    )
-
-    daemon_info: "DaemonInfo | None" = betterproto2.field(
-        4, betterproto2.TYPE_MESSAGE, optional=True, group="value"
-    )
-
-    resolve: "ResolveResult | None" = betterproto2.field(
-        5, betterproto2.TYPE_MESSAGE, optional=True, group="value"
-    )
-
-    empty: "Empty | None" = betterproto2.field(
-        6, betterproto2.TYPE_MESSAGE, optional=True, group="value"
-    )
-
-
-default_message_pool.register_message("nuefs", "OkPayload", OkPayload)
-
-
-@dataclass(eq=False, repr=False)
 class OwnerInfo(betterproto2.Message):
     owner: "str" = betterproto2.field(1, betterproto2.TYPE_STRING)
 
@@ -160,51 +145,6 @@ class OwnerInfo(betterproto2.Message):
 
 
 default_message_pool.register_message("nuefs", "OwnerInfo", OwnerInfo)
-
-
-@dataclass(eq=False, repr=False)
-class Request(betterproto2.Message):
-    """
-    -- Requests --
-
-    Oneofs:
-        - method:
-    """
-
-    mount: "MountReq | None" = betterproto2.field(
-        1, betterproto2.TYPE_MESSAGE, optional=True, group="method"
-    )
-
-    unmount: "UnmountReq | None" = betterproto2.field(
-        2, betterproto2.TYPE_MESSAGE, optional=True, group="method"
-    )
-
-    which: "WhichReq | None" = betterproto2.field(
-        3, betterproto2.TYPE_MESSAGE, optional=True, group="method"
-    )
-
-    status: "StatusReq | None" = betterproto2.field(
-        4, betterproto2.TYPE_MESSAGE, optional=True, group="method"
-    )
-
-    daemon_info: "DaemonInfoReq | None" = betterproto2.field(
-        5, betterproto2.TYPE_MESSAGE, optional=True, group="method"
-    )
-
-    update: "UpdateReq | None" = betterproto2.field(
-        6, betterproto2.TYPE_MESSAGE, optional=True, group="method"
-    )
-
-    resolve: "ResolveReq | None" = betterproto2.field(
-        7, betterproto2.TYPE_MESSAGE, optional=True, group="method"
-    )
-
-    shutdown: "ShutdownReq | None" = betterproto2.field(
-        8, betterproto2.TYPE_MESSAGE, optional=True, group="method"
-    )
-
-
-default_message_pool.register_message("nuefs", "Request", Request)
 
 
 @dataclass(eq=False, repr=False)
@@ -216,34 +156,13 @@ default_message_pool.register_message("nuefs", "ResolveReq", ResolveReq)
 
 
 @dataclass(eq=False, repr=False)
-class ResolveResult(betterproto2.Message):
+class ResolveResp(betterproto2.Message):
     mount_id: "int | None" = betterproto2.field(
         1, betterproto2.TYPE_UINT64, optional=True
     )
 
 
-default_message_pool.register_message("nuefs", "ResolveResult", ResolveResult)
-
-
-@dataclass(eq=False, repr=False)
-class Response(betterproto2.Message):
-    """
-    -- Responses --
-
-    Oneofs:
-        - result:
-    """
-
-    ok: "OkPayload | None" = betterproto2.field(
-        1, betterproto2.TYPE_MESSAGE, optional=True, group="result"
-    )
-
-    error: "str | None" = betterproto2.field(
-        2, betterproto2.TYPE_STRING, optional=True, group="result"
-    )
-
-
-default_message_pool.register_message("nuefs", "Response", Response)
+default_message_pool.register_message("nuefs", "ResolveResp", ResolveResp)
 
 
 @dataclass(eq=False, repr=False)
@@ -255,13 +174,11 @@ default_message_pool.register_message("nuefs", "ShutdownReq", ShutdownReq)
 
 
 @dataclass(eq=False, repr=False)
-class StatusList(betterproto2.Message):
-    mounts: "list[MountStatus]" = betterproto2.field(
-        1, betterproto2.TYPE_MESSAGE, repeated=True
-    )
+class ShutdownResp(betterproto2.Message):
+    pass
 
 
-default_message_pool.register_message("nuefs", "StatusList", StatusList)
+default_message_pool.register_message("nuefs", "ShutdownResp", ShutdownResp)
 
 
 @dataclass(eq=False, repr=False)
@@ -273,11 +190,29 @@ default_message_pool.register_message("nuefs", "StatusReq", StatusReq)
 
 
 @dataclass(eq=False, repr=False)
+class StatusResp(betterproto2.Message):
+    mounts: "list[MountStatus]" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, repeated=True
+    )
+
+
+default_message_pool.register_message("nuefs", "StatusResp", StatusResp)
+
+
+@dataclass(eq=False, repr=False)
 class UnmountReq(betterproto2.Message):
     mount_id: "int" = betterproto2.field(1, betterproto2.TYPE_UINT64)
 
 
 default_message_pool.register_message("nuefs", "UnmountReq", UnmountReq)
+
+
+@dataclass(eq=False, repr=False)
+class UnmountResp(betterproto2.Message):
+    pass
+
+
+default_message_pool.register_message("nuefs", "UnmountResp", UnmountResp)
 
 
 @dataclass(eq=False, repr=False)
@@ -297,6 +232,14 @@ default_message_pool.register_message("nuefs", "UpdateReq", UpdateReq)
 
 
 @dataclass(eq=False, repr=False)
+class UpdateResp(betterproto2.Message):
+    pass
+
+
+default_message_pool.register_message("nuefs", "UpdateResp", UpdateResp)
+
+
+@dataclass(eq=False, repr=False)
 class WhichReq(betterproto2.Message):
     mount_id: "int" = betterproto2.field(1, betterproto2.TYPE_UINT64)
 
@@ -304,3 +247,89 @@ class WhichReq(betterproto2.Message):
 
 
 default_message_pool.register_message("nuefs", "WhichReq", WhichReq)
+
+
+@dataclass(eq=False, repr=False)
+class WhichResp(betterproto2.Message):
+    owner_info: "OwnerInfo | None" = betterproto2.field(
+        1, betterproto2.TYPE_MESSAGE, optional=True
+    )
+
+
+default_message_pool.register_message("nuefs", "WhichResp", WhichResp)
+
+
+class NueFsStub:
+    """
+    -- Service --
+    """
+
+    def __init__(self, channel: grpc.Channel):
+        self._channel = channel
+
+    def mount(self, message: "MountReq") -> "MountResp":
+        return self._channel.unary_unary(
+            "/nuefs.NueFs/Mount",
+            MountReq.SerializeToString,
+            MountResp.FromString,
+        )(message)
+
+    def unmount(self, message: "UnmountReq") -> "UnmountResp":
+        return self._channel.unary_unary(
+            "/nuefs.NueFs/Unmount",
+            UnmountReq.SerializeToString,
+            UnmountResp.FromString,
+        )(message)
+
+    def which(self, message: "WhichReq") -> "WhichResp":
+        return self._channel.unary_unary(
+            "/nuefs.NueFs/Which",
+            WhichReq.SerializeToString,
+            WhichResp.FromString,
+        )(message)
+
+    def status(self, message: "StatusReq | None" = None) -> "StatusResp":
+        if message is None:
+            message = StatusReq()
+
+        return self._channel.unary_unary(
+            "/nuefs.NueFs/Status",
+            StatusReq.SerializeToString,
+            StatusResp.FromString,
+        )(message)
+
+    def get_daemon_info(
+        self, message: "DaemonInfoReq | None" = None
+    ) -> "DaemonInfoResp":
+        if message is None:
+            message = DaemonInfoReq()
+
+        return self._channel.unary_unary(
+            "/nuefs.NueFs/GetDaemonInfo",
+            DaemonInfoReq.SerializeToString,
+            DaemonInfoResp.FromString,
+        )(message)
+
+    def update(self, message: "UpdateReq") -> "UpdateResp":
+        return self._channel.unary_unary(
+            "/nuefs.NueFs/Update",
+            UpdateReq.SerializeToString,
+            UpdateResp.FromString,
+        )(message)
+
+    def resolve(self, message: "ResolveReq") -> "ResolveResp":
+        return self._channel.unary_unary(
+            "/nuefs.NueFs/Resolve",
+            ResolveReq.SerializeToString,
+            ResolveResp.FromString,
+        )(message)
+
+    def shutdown(self, message: "ShutdownReq | None" = None) -> "ShutdownResp":
+        if message is None:
+            message = ShutdownReq()
+
+        return self._channel.unary_unary(
+            "/nuefs.NueFs/Shutdown",
+            ShutdownReq.SerializeToString,
+            ShutdownResp.FromString,
+        )(message)

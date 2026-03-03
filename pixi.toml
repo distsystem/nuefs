@@ -27,6 +27,7 @@ libfuse3 = "*"
 [package.run-dependencies]
 python = ">=3.12"
 betterproto2 = ">=0.9.0"
+grpcio = "*"
 pydantic-settings = ">=2.0"
 pyyaml = "*"
 rich = ">=13.0"
@@ -42,7 +43,7 @@ betterproto2 = "*"
 rust = "*"
 
 [feature.proto.tasks]
-protogen = "cargo install protoc-gen-prost --root \"$CONDA_PREFIX\" --quiet && buf generate proto"
+protogen = "cargo install protoc-gen-prost protoc-gen-tonic --root \"$CONDA_PREFIX\" --quiet && buf generate proto"
 
 [feature.proto.pypi-dependencies]
 betterproto2-compiler = ">=0.9.0"

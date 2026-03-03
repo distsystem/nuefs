@@ -55,8 +55,8 @@ pixi run develop  # Build and install the package
 │  handle.which(path)                                         │
 │  handle.close()                                             │
 └─────────────────────────────────────────────────────────────┘
-                    │ protobuf over Unix socket
-                    │ (length-prefix framing, betterproto2)
+                    │ gRPC over Unix socket
+                    │ (grpcio client, tonic server)
                     ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                   Rust Daemon (nuefsd)                      │
@@ -67,9 +67,9 @@ pixi run develop  # Build and install the package
 └─────────────────────────────────────────────────────────────┘
 ```
 
-IPC protocol: `proto/nuefs.proto` (single source of truth)
-- Rust side: prost (build.rs compiles proto)
-- Python side: betterproto2 (buf generate)
+IPC protocol: `proto/nuefs.proto` (single source of truth, defines `service NueFs`)
+- Rust side: tonic + prost (buf generate with protoc-gen-prost + protoc-gen-tonic)
+- Python side: grpcio + betterproto2 (buf generate with protoc-gen-python_betterproto2)
 
 ## Project Structure
 
@@ -81,25 +81,25 @@ nuefs/
 ├── python/
 │   └── nuefs/
 │       ├── __init__.py   # public API re-exports
-│       ├── _ipc.py       # protobuf IPC client
-│       ├── _proto/       # generated betterproto2 code
+│       ├── _ipc.py       # gRPC IPC client (grpcio)
+│       ├── _proto/       # generated betterproto2 + gRPC stub code
 │       ├── core.py       # dataclasses + Handle
 │       ├── manifest.py   # manifest parsing (.gitnue)
 │       ├── sources.py    # named source resolution
 │       └── cli.py        # CLI (git nue mount/unmount/status/stop/init/add/export/which)
 └── nuefsd/               # Rust daemon (self-contained)
     ├── Cargo.toml
-    ├── build.rs          # prost-build proto compilation
     ├── pixi.toml         # pixi package for daemon
     ├── recipe.yaml       # rattler-build recipe
     └── src/
         ├── lib.rs        # module declarations + proto include
         ├── types.rs      # internal types + proto conversions
+        ├── nuefs/        # generated prost + tonic code (via buf generate)
         ├── daemon/
         │   ├── mod.rs
-        │   ├── server.rs # protobuf IPC server (tokio)
+        │   ├── server.rs # tonic gRPC server
         │   ├── manager.rs# mount manager
-        │   └── fuse.rs   # FUSE implementation (fuse_mt)
+        │   └── fuse.rs   # FUSE implementation (fuser)
         └── bin/
             └── nuefsd.rs # daemon entry
 ```

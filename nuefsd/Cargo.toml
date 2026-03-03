@@ -11,7 +11,10 @@ name = "nuefsd"
 
 [dependencies]
 camino = { version = "1", features = ["serde1"] }
-prost = "0.13"
+prost = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
+tokio-stream = { version = "0.1", features = ["net"] }
 serde = { version = "1", features = ["derive"] }
 fuser = "0.16"
 libc = "0.2"

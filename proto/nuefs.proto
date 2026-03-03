@@ -32,19 +32,6 @@ message DaemonInfo {
 
 // -- Requests --
 
-message Request {
-  oneof method {
-    MountReq mount = 1;
-    UnmountReq unmount = 2;
-    WhichReq which = 3;
-    StatusReq status = 4;
-    DaemonInfoReq daemon_info = 5;
-    UpdateReq update = 6;
-    ResolveReq resolve = 7;
-    ShutdownReq shutdown = 8;
-  }
-}
-
 message MountReq {
   string root = 1;
   repeated ManifestEntry entries = 2;
@@ -67,24 +54,24 @@ message ShutdownReq {}
 
 // -- Responses --
 
-message Response {
-  oneof result {
-    OkPayload ok = 1;
-    string error = 2;
-  }
-}
+message MountResp { uint64 mount_id = 1; }
+message UnmountResp {}
+message WhichResp { OwnerInfo owner_info = 1; }
+message StatusResp { repeated MountStatus mounts = 1; }
+message DaemonInfoResp { DaemonInfo info = 1; }
+message UpdateResp {}
+message ResolveResp { optional uint64 mount_id = 1; }
+message ShutdownResp {}
 
-message OkPayload {
-  oneof value {
-    uint64 mount_id = 1;
-    OwnerInfo owner_info = 2;
-    StatusList status = 3;
-    DaemonInfo daemon_info = 4;
-    ResolveResult resolve = 5;
-    Empty empty = 6;
-  }
-}
+// -- Service --
 
-message StatusList { repeated MountStatus mounts = 1; }
-message ResolveResult { optional uint64 mount_id = 1; }
-message Empty {}
+service NueFs {
+  rpc Mount(MountReq) returns (MountResp);
+  rpc Unmount(UnmountReq) returns (UnmountResp);
+  rpc Which(WhichReq) returns (WhichResp);
+  rpc Status(StatusReq) returns (StatusResp);
+  rpc GetDaemonInfo(DaemonInfoReq) returns (DaemonInfoResp);
+  rpc Update(UpdateReq) returns (UpdateResp);
+  rpc Resolve(ResolveReq) returns (ResolveResp);
+  rpc Shutdown(ShutdownReq) returns (ShutdownResp);
+}
