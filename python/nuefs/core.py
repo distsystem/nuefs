@@ -1,7 +1,6 @@
-"""NueFS core implementation."""
+"""NueFS core: gRPC client objects."""
 
 import collections.abc
-import dataclasses
 import os
 import pathlib
 import shutil
@@ -9,33 +8,41 @@ import socket
 import subprocess
 import sys
 import time
-import typing
 
 import grpc
 
 from nuefs._proto.nuefs import (
+    DaemonInfo,
     DaemonInfoReq,
-    ManifestEntry as ProtoEntry,
+    ManifestEntry,
     MountReq,
-    MountRoot as ProtoMount,
+    MountRoot,
     NueFsStub,
     ResolveReq,
     ShutdownReq,
     StatusReq,
     UnmountReq,
     UpdateReq,
-    WhichReq,
 )
 
 
 def default_socket_path() -> pathlib.Path:
-    """Get the default socket path for the daemon."""
     env = os.environ.get("NUEFSD_SOCKET")
     if env:
         return pathlib.Path(env)
     base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
     uid = os.getuid()
     return pathlib.Path(base) / f"nuefsd-{uid}.sock"
+
+
+def daemon_running(socket_path: pathlib.Path | None = None) -> bool:
+    sp = socket_path or default_socket_path()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(str(sp))
+        return True
+    except (FileNotFoundError, ConnectionRefusedError, OSError):
+        return False
 
 
 def _find_nuefsd() -> pathlib.Path | None:
@@ -54,13 +61,8 @@ def _find_nuefsd() -> pathlib.Path | None:
 
 
 def _ensure_daemon(socket_path: pathlib.Path) -> None:
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(str(socket_path))
-        s.close()
+    if daemon_running(socket_path):
         return
-    except (FileNotFoundError, ConnectionRefusedError, OSError):
-        pass
 
     nuefsd = _find_nuefsd()
     if nuefsd is None:
@@ -76,79 +78,26 @@ def _ensure_daemon(socket_path: pathlib.Path) -> None:
     )
 
     for _ in range(40):
-        try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.connect(str(socket_path))
-            s.close()
+        if daemon_running(socket_path):
             return
-        except (FileNotFoundError, ConnectionRefusedError, OSError):
-            time.sleep(0.05)
+        time.sleep(0.05)
 
     msg = "nuefsd started but did not become ready"
     raise TimeoutError(msg)
 
 
-def _stub() -> NueFsStub:
-    socket_path = default_socket_path()
-    _ensure_daemon(socket_path)
-    channel = grpc.insecure_channel(
-        f"unix:{socket_path}",
-        options=[("grpc.default_authority", "localhost")],
-    )
-    return NueFsStub(channel)
+class Mount:
+    """Handle to a single mounted NueFS filesystem."""
 
+    __slots__ = ("_stub", "_root", "_mount_id")
 
-@dataclasses.dataclass
-class ManifestEntry:
-    virtual_path: pathlib.PurePosixPath
-    backend_path: pathlib.Path
-    is_dir: bool
-
-    def _to_proto(self) -> ProtoEntry:
-        return ProtoEntry(
-            virtual_path=str(self.virtual_path),
-            backend_path=str(self.backend_path),
-            is_dir=self.is_dir,
-        )
-
-
-@dataclasses.dataclass
-class MountRoot:
-    virtual_prefix: pathlib.PurePosixPath
-    backend_path: pathlib.Path
-
-    def _to_proto(self) -> ProtoMount:
-        return ProtoMount(
-            virtual_prefix=str(self.virtual_prefix),
-            backend_path=str(self.backend_path),
-        )
-
-
-@dataclasses.dataclass
-class OwnerInfo:
-    owner: str
-    backend_path: pathlib.Path
-
-
-@dataclasses.dataclass
-class DaemonInfo:
-    pid: int
-    socket: pathlib.Path
-    started_at: int
-
-
-class Handle:
-    """Handle to a mounted NueFS filesystem."""
-
-    __slots__ = ("_root", "_mount_id")
-
-    def __init__(self, root: str, mount_id: int) -> None:
+    def __init__(self, stub: NueFsStub, root: str, mount_id: int) -> None:
+        self._stub = stub
         self._root = root
         self._mount_id = mount_id
 
     @property
     def root(self) -> str:
-        """Mount root path (read-only)."""
         return self._root
 
     def update(
@@ -156,77 +105,49 @@ class Handle:
         entries: collections.abc.Sequence[ManifestEntry],
         mount_roots: collections.abc.Sequence[MountRoot] | None = None,
     ) -> None:
-        """Update the mount manifest."""
-        _stub().update(
+        self._stub.update(
             UpdateReq(
                 mount_id=self._mount_id,
-                entries=[e._to_proto() for e in entries],
-                mount_roots=[m._to_proto() for m in (mount_roots or [])],
+                entries=list(entries),
+                mount_roots=list(mount_roots or []),
             )
         )
 
-    def which(self, path: str) -> OwnerInfo | None:
-        """Query which backend owns a path."""
-        resp = _stub().which(
-            WhichReq(mount_id=self._mount_id, path=path)
-        )
-        info = resp.owner_info
-        if info is None or not info.owner:
-            return None
-        return OwnerInfo(owner=info.owner, backend_path=pathlib.Path(info.backend_path))
-
     def unmount(self) -> None:
-        """Unmount the filesystem."""
-        _stub().unmount(UnmountReq(mount_id=self._mount_id))
-
-    def close(self) -> None:
-        """Release the client handle (mount stays alive in daemon)."""
-
-    def __enter__(self) -> typing.Self:
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: typing.Any,
-    ) -> bool:
-        self.close()
-        return False
+        self._stub.unmount(UnmountReq(mount_id=self._mount_id))
 
 
-def open(root: str | os.PathLike[str] | pathlib.Path) -> Handle:
-    """Open a NueFS mount, creating an empty one if it doesn't exist."""
-    root_path = pathlib.Path(root).expanduser().resolve()
+class NueFs:
+    """gRPC client for the NueFS daemon."""
 
-    resp = _stub().resolve(ResolveReq(root=str(root_path)))
-    if resp.mount_id is not None:
-        return Handle(str(root_path), resp.mount_id)
+    __slots__ = ("_channel", "_stub")
 
-    resp = _stub().mount(MountReq(root=str(root_path)))
-    return Handle(str(root_path), resp.mount_id)
+    def __init__(self, socket_path: pathlib.Path | None = None) -> None:
+        sp = socket_path or default_socket_path()
+        _ensure_daemon(sp)
+        self._channel = grpc.insecure_channel(
+            f"unix:{sp}",
+            options=[("grpc.default_authority", "localhost")],
+        )
+        self._stub = NueFsStub(self._channel)
 
+    def connect(self, root: str | os.PathLike[str]) -> Mount:
+        root_str = str(pathlib.Path(root).expanduser().resolve())
+        resp = self._stub.resolve(ResolveReq(root=root_str))
+        mount_id = resp.mount_id
+        if mount_id is None:
+            mount_id = self._stub.mount(MountReq(root=root_str)).mount_id
+        return Mount(self._stub, root_str, mount_id)
 
-def status() -> list[Handle]:
-    """List all active mounts."""
-    resp = _stub().status(StatusReq())
-    return [Handle(m.root, m.mount_id) for m in resp.mounts]
+    def status(self) -> list[Mount]:
+        resp = self._stub.status(StatusReq())
+        return [Mount(self._stub, m.root, m.mount_id) for m in resp.mounts]
 
+    def info(self) -> DaemonInfo:
+        return self._stub.get_daemon_info(DaemonInfoReq()).info
 
-def daemon_info() -> DaemonInfo:
-    """Get information about the daemon process."""
-    resp = _stub().get_daemon_info(DaemonInfoReq())
-    info = resp.info
-    return DaemonInfo(
-        pid=info.pid,
-        socket=pathlib.Path(info.socket),
-        started_at=info.started_at,
-    )
-
-
-def shutdown() -> None:
-    """Shutdown the daemon gracefully."""
-    try:
-        _stub().shutdown(ShutdownReq())
-    except grpc.RpcError:
-        pass
+    def shutdown(self) -> None:
+        try:
+            self._stub.shutdown(ShutdownReq())
+        except grpc.RpcError:
+            pass

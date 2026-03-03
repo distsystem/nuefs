@@ -11,7 +11,7 @@ from rich.panel import Panel
 from rich.tree import Tree
 
 import nuefs
-from nuefs.core import ManifestEntry
+from nuefs._proto.nuefs import ManifestEntry
 
 console = rich.get_console()
 
@@ -63,7 +63,7 @@ class Mount(BaseSettings):
             entries.update(resolved)
             mr = mount_entry.mount_root(resolved_src[mount_entry.source])
             mount_roots.append(mr)
-            if mr.backend_path != root:
+            if mr.backend_path != str(root):
                 for vpath in resolved:
                     external_vpaths.add(vpath.split("/", 1)[0])
 
@@ -75,17 +75,18 @@ class Mount(BaseSettings):
         if external_vpaths:
             gitdir_mod.sync_git_exclude(root, external_vpaths)
 
-        with nuefs.open(root) as h:
-            h.update(list(entries.values()), mount_roots)
-            console.print(
-                Panel(
-                    "Mount created, but your current shell is already inside the directory.\n"
-                    "Re-enter it to see the mounted view:\n\n"
-                    "  cd .. && cd -\n",
-                    title="git nue mount",
-                    border_style="yellow",
-                )
+        client = nuefs.NueFs()
+        mount = client.connect(root)
+        mount.update(list(entries.values()), mount_roots)
+        console.print(
+            Panel(
+                "Mount created, but your current shell is already inside the directory.\n"
+                "Re-enter it to see the mounted view:\n\n"
+                "  cd .. && cd -\n",
+                title="git nue mount",
+                border_style="yellow",
             )
+        )
 
 
 class Unmount(BaseSettings):
@@ -100,16 +101,17 @@ class Unmount(BaseSettings):
         os.chdir("/")
 
         socket_path = nuefs.default_socket_path()
-        if not _daemon_running(socket_path):
+        if not nuefs.daemon_running(socket_path):
             try:
                 _lazy_unmount(pathlib.Path(root))
             except RuntimeError:
                 pass
             return
 
-        for h in nuefs.status():
-            if os.path.normpath(h.root) == root:
-                h.unmount()
+        client = nuefs.NueFs()
+        for mount in client.status():
+            if os.path.normpath(mount.root) == root:
+                mount.unmount()
                 return
 
 
@@ -117,9 +119,10 @@ class Status(BaseSettings):
     def run(self) -> None:
         import humanize
 
-        info = nuefs.daemon_info()
+        client = nuefs.NueFs()
+        info = client.info()
         uptime = int(time.time()) - info.started_at
-        mounts = nuefs.status()
+        mounts = client.status()
 
         lines = [
             f"[bold]pid:[/] {info.pid}",
@@ -127,8 +130,8 @@ class Status(BaseSettings):
             f"[bold]uptime:[/] {humanize.naturaldelta(uptime)}",
             f"[bold]mounts:[/] {len(mounts)}",
         ]
-        for h in mounts:
-            lines.append(f"  {h.root}")
+        for mount in mounts:
+            lines.append(f"  {mount.root}")
 
         console.print(Panel("\n".join(lines), title="nuefsd", border_style="dim"))
 
@@ -136,11 +139,11 @@ class Status(BaseSettings):
 class Stop(BaseSettings):
     def run(self) -> None:
         socket_path = nuefs.default_socket_path()
-        if not _daemon_running(socket_path):
+        if not nuefs.daemon_running(socket_path):
             console.print("[dim]daemon not running[/]")
             return
 
-        nuefs.shutdown()
+        nuefs.NueFs().shutdown()
         console.print("[green]daemon stopped[/]")
 
 
@@ -169,18 +172,6 @@ def _render_entries(root_node: Tree, entries: dict[str, ManifestEntry]) -> None:
         else:
             label = f"{vpath} [dim]→ {entry.backend_path}[/]"
         root_node.add(label)
-
-
-def _daemon_running(socket_path: pathlib.Path) -> bool:
-    import socket as sock
-
-    try:
-        s = sock.socket(sock.AF_UNIX, sock.SOCK_STREAM)
-        s.connect(str(socket_path))
-        s.close()
-        return True
-    except (FileNotFoundError, ConnectionRefusedError, OSError):
-        return False
 
 
 class GitNue(BaseSettings):

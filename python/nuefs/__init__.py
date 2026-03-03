@@ -1,26 +1,14 @@
 """NueFS - FUSE-based layered filesystem for Python."""
 
-from nuefs.core import (
-    DaemonInfo,
-    Handle,
-    ManifestEntry,
-    MountRoot,
-    OwnerInfo,
-    daemon_info,
-    default_socket_path,
-    open,
-    shutdown,
-    status,
+from nuefs._proto.nuefs import (
+    DaemonInfo as DaemonInfo,
+    ManifestEntry as ManifestEntry,
+    MountRoot as MountRoot,
+    OwnerInfo as OwnerInfo,
 )
-__all__ = [
-    "DaemonInfo",
-    "Handle",
-    "ManifestEntry",
-    "MountRoot",
-    "OwnerInfo",
-    "daemon_info",
-    "default_socket_path",
-    "open",
-    "shutdown",
-    "status",
-]
+from nuefs.core import (
+    Mount as Mount,
+    NueFs as NueFs,
+    daemon_running as daemon_running,
+    default_socket_path as default_socket_path,
+)

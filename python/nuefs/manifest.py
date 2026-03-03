@@ -13,7 +13,7 @@ import pygit2
 import yaml
 from pydantic import Discriminator, Field, Tag
 
-from nuefs.core import ManifestEntry, MountRoot
+from nuefs._proto.nuefs import ManifestEntry, MountRoot
 from nuefs.gitconfig import NueGitConfig
 
 logger = logging.getLogger(__name__)
@@ -128,8 +128,7 @@ class MountEntry(pydantic.BaseModel):
             vpath = prefix if prefix else source.name
             if self.exclude.match(vpath) and not self.include.match(vpath):
                 return {}
-            vp = pathlib.PurePosixPath(vpath)
-            return {str(vp): ManifestEntry(virtual_path=vp, backend_path=source, is_dir=False)}
+            return {vpath: ManifestEntry(virtual_path=vpath, backend_path=str(source), is_dir=False)}
 
         # Directory
         repo: pygit2.Repository | None = None
@@ -148,13 +147,12 @@ class MountEntry(pydantic.BaseModel):
             if self.exclude.match(path_arg) and not self.include.match(path_arg):
                 continue
             vpath = f"{prefix}/{item.name}" if prefix else item.name
-            vp = pathlib.PurePosixPath(vpath)
-            entries[str(vp)] = ManifestEntry(virtual_path=vp, backend_path=item, is_dir=is_dir)
+            entries[vpath] = ManifestEntry(virtual_path=vpath, backend_path=str(item), is_dir=is_dir)
         return entries
 
     def mount_root(self, source_path: pathlib.Path) -> MountRoot:
         source, prefix = self._apply_transform(source_path)
-        return MountRoot(virtual_prefix=pathlib.PurePosixPath(prefix), backend_path=source)
+        return MountRoot(virtual_prefix=prefix, backend_path=str(source))
 
     def _apply_transform(
         self, source_path: pathlib.Path,
