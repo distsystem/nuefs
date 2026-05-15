@@ -1,86 +1,128 @@
-# NueFS
+# nue
 
-FUSE-based union filesystem for Python.
+> _鵺 — a folkloric chimera assembled from the limbs of disparate beasts._
 
-Named after [Nue (鵺)](https://en.wikipedia.org/wiki/Nue), a Japanese chimera with parts from different animals — just like NueFS composes files from different layers into a unified view.
+**nue** is a vendoring tool for git. You declare which fragments of which
+upstream repos make up your project; `nue sync` pulls each upstream,
+filters its history, and **replays the resulting commits onto your branch**
+with full author / message / commit-graph fidelity. Vendored files end up in
+your git history as ordinary tracked content, ready to commit, review, and
+ship.
 
-## Why
+- No daemon, no FUSE, no kernel modules — single Rust binary
+- Powered by [josh](https://github.com/josh-project/josh) as the history-filter engine
+- File-level mapping (precise) and tree-level mapping (recursive)
+- Bidirectional: `nue push` lifts host-side edits back to an upstream
+- State lives in `Nue-Source-<name>: <sha>` commit trailers (à la Copybara `GitOrigin-RevId`) — no separate state file
 
-You have a project template (cookiecutter, copier, etc.) and want to keep it in sync with your projects. But once you scaffold a project, the template files are copied — updates require manual merging or re-scaffolding.
+## Quick start
 
-NueFS creates a **live template overlay**: template files appear directly in your project without copying. The template repo stays independent with its own git history — but your project sees the latest template files instantly.
+```bash
+# install nue
+cargo install --path .
 
-- **Write-through**: Edits to template files go directly to the template repo
-- **No copies**: Template updates appear immediately in all projects
-- **No symlinks**: Tools see real files, directories merge naturally
+# install josh-filter (history-filter engine)
+cargo install --git https://github.com/josh-project/josh \
+  --bin josh-filter josh-cli
 
-## Union View
+# in your git repo, write nue.yaml:
+cat > nue.yaml <<'EOF'
+version: 1
+sources:
+  common:
+    url: git@github.com:myorg/common-libs.git
+    ref: refs/heads/main
+grafts:
+  - from: common
+    files:
+      - {src: utils/logger.py, dst: libs/log.py}
+    trees:
+      - {src: schemas/, dst: vendor/schemas/}
+EOF
 
-```text
-~/myproject/                    # your project (union view)
-  .git/                         # from: ~/myproject/.git (project's own git)
-  nue.yaml                      # from: ~/myproject/ (base layer)
-  .eslintrc.json                # from: ~/templates/typescript/.eslintrc.json
-  .prettierrc                   # from: ~/templates/typescript/.prettierrc
-  tsconfig.json                 # from: ~/templates/typescript/tsconfig.json
-  .github/
-    workflows/
-      ci.yml                    # from: ~/templates/typescript/.github/workflows/
-  src/
-    index.ts                    # from: ~/myproject/src/ (your code)
-    utils.ts                    # from: ~/myproject/src/ (your code)
-
-~/templates/typescript/         # template repo (independent git repo)
-  .git/                         # stays here, NOT mounted to projects
-  .eslintrc.json
-  .prettierrc
-  tsconfig.json
-  .github/
-    workflows/
-      ci.yml
+# pull upstream, filter, replay onto your branch
+nue sync
 ```
 
-Unlike cookiecutter/copier, template files are not copied — they're mounted. Update the template once, all projects see the change.
+End-to-end self-contained demo: `./examples/demo.sh`.
 
+## Vocabulary
 
-## Comparison with Other Approaches
+| Term | Meaning |
+|------|---------|
+| **source** | an upstream repo declared in `sources:` |
+| **graft** | one `(upstream path → host path)` mapping |
+| **file graft / tree graft** | single file vs directory grafts |
+| **host** | your work repo (term-of-art for "graft recipient") |
+| **sync** | pull sources, filter, replay onto host HEAD |
+| **push** | host edits → upstream commit on `refs/heads/nue-push/<source>` |
 
+## Architecture
 
-| | Dir merge | Relocation | Write-through | Transparent | Live sync |
-|---|---|---|---|---|---|
-| **overlayfs** | ✓ | ✗ | Upper only | ✓ | ✓ |
-| **unionfs** | ✓ | ✗ | Limited | ✓ | ✓ |
-| **mergerfs** | Pool only | ✗ | ✓ | ✓ | ✓ |
-| **git submodule** | ✗ (subdirs only) | Subdir only | ✓ | ✓ | ✗ (manual) |
-| **git subtree** | ✗ (subdirs only) | Subdir only | ✗ (copy) | ✓ | ✗ (manual) |
-| **vcsh** | ✓ | ✗ (same layout) | ✓ | ✓ | ✗ (manual) |
-| **jj monorepo** | ✗ | ✗ | ✓ | ✓ | ✗ |
-| **GNU Stow** | ✓ | ✓ | ✓ | ✗ (symlink) | ✗ (re-stow) |
-| **chezmoi** | ✓ | ✓ | ✗ (copy) | ✗ (symlink/copy) | ✗ (apply) |
-| **Nix home-manager** | ✓ | ✓ | ✗ (read-only) | ✗ (symlink→store) | ✗ (switch) |
-| **NueFS** | ✓ | ✓ | ✓ | ✓ | ✓ |
-
-
-## Mount Types
-
-NueFS supports both directory and single-file mounts:
-
-```yaml
-# nue.yaml
-mounts:
-  # Directory mount: entire directory appears at target path
-  - source: ~/repos/core
-    target: packages/core
-
-  # Single-file mount: individual file appears at target path
-  - source: ~/repos/shared-configs/.eslintrc.json
-    target: .eslintrc.json
+```
+nue.yaml ──► Manifest ──► filter_spec ──► josh filter string
+                                                 │
+                                                 ▼
+.git/nue/<src>.git (bare clone) ──┬── git fetch
+                                  ├── josh-filter <spec> → refs/nue/filtered
+                                  └── git fetch into host → refs/nue/<src>/filtered
+                                                 │
+                                                 ▼
+                                       host repo HEAD
+                                       (git merge with
+                                        Nue-Source-<src>: trailer)
 ```
 
-This is the key advantage over git submodules — you can mount individual config files (`.eslintrc`, `.prettierrc`, `tsconfig.json`) directly into your workspace root without nesting them in subdirectories.
+No daemon, no IPC, no codegen. All state:
 
-## Requirements
+- `.git/nue/<src>.git/` — bare clones (one per source, shared across worktrees)
+- `Nue-Source-<src>: <sha>` trailer on the latest sync's merge commit
 
-- Linux with FUSE support
-- `fuse3` package installed
-- User in `fuse` group, or `/etc/fuse.conf` with `user_allow_other`
+See [`docs/design.md`](docs/design.md) for the longer story.
+
+## CLI
+
+```
+nue sync                       # pull sources, filter, replay onto HEAD
+nue push <source>              # snapshot host edits → upstream branch
+                               # refs/heads/nue-push/<source>
+nue debug filter-spec          # show the generated josh filter (debugging)
+
+# common flags:
+nue --repo PATH ...            # operate on PATH (default: cwd)
+nue --manifest FILE ...        # use FILE instead of nue.yaml
+```
+
+## Status
+
+Pre-1.0. Currently working:
+
+- `sync` for file and tree grafts (multi-source orchestration)
+- `push` for file grafts (single-commit snapshot)
+- End-to-end smoke test (`./examples/demo.sh`)
+
+Not yet:
+
+- Tree graft push (only file grafts can push)
+- Conflict policy on local edits vs upstream changes
+- `eject` / `which` / `status` subcommands
+- Authentication helpers for private remotes
+- Pre-built `josh-filter` distribution
+
+The project previously implemented this concept via a FUSE daemon. That
+architecture has been replaced; see git history if you need it (last commit
+of the FUSE branch is `cabd706`).
+
+## Comparison to alternatives
+
+| Tool | Why nue exists anyway |
+|------|----------------------|
+| `git submodule` | whole-repo granularity; we want file/dir-level |
+| `git subtree` | tree-only, awkward to update, no replay control |
+| `josh link` (in josh-cli) | works; manifest is per-dir `.link.josh`; view-oriented modes. nue trades that for one yaml + Nue-Source trailer that survives PR review |
+| [Copybara](https://github.com/google/copybara) | feature-rich and battle-tested at Google; JVM/Bazel, Starlark config |
+| [vendir](https://carvel.dev/vendir/) | snapshot vendoring; no commit replay |
+
+## License
+
+Apache-2.0

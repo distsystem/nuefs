@@ -1,105 +1,94 @@
-use python skill
+# CLAUDE.md
 
-## FUSE Mount Safety
+## Project
 
-Never `cd` into the mount directory when testing FUSE mounts. If the mount fails, all shell commands will hang with EIO errors.
+**nue** —— file-level git vendoring with commit-level replay, powered by
+[josh](https://github.com/josh-project/josh) as the history-filter engine.
 
-Always operate from outside:
+A host repo is composed from **grafts**: each graft maps `(upstream path →
+host path)` from a named **source** repo. `nue sync` pulls each source,
+filters its history through josh, and replays the resulting commits onto the
+host's branch with a `Nue-Source-<name>: <upstream-sha>` trailer. `nue push`
+goes the other way: snapshot host edits at vendored paths, build an
+upstream-shaped commit, push to the source as a branch.
+
+The project is **post-pivot**: it used to be a FUSE-based daemon (kept on
+`main` until commit `cabd706`); the current architecture is a single Rust
+binary, no daemon, shells out to `josh-filter` and `git`.
+
+## Build / test
+
 ```bash
-# Good: run commands from outside
-(cd /tmp && ls /home/rok/distsystem/nuefs/sheaves/)
-
-# Bad: don't cd into mount directory
-cd /home/rok/distsystem/nuefs && ls sheaves/
+cargo build                       # release: cargo build --release
+cargo test                        # unit tests
+./examples/demo.sh                # end-to-end smoke test
 ```
 
-Recovery when stuck:
+`./examples/demo.sh` needs `josh-filter` on PATH (or set
+`NUE_JOSH_FILTER=/path/to/josh-filter`). Install with:
+
 ```bash
-fusermount3 -uz /home/rok/distsystem/nuefs
-pkill -9 nuefsd
+cargo install --git https://github.com/josh-project/josh \
+  --bin josh-filter josh-cli
 ```
 
-## Debugging
+Override the nue binary the demo runs with `NUE=/path/to/nue`.
 
-Daemon logs are written to `$XDG_RUNTIME_DIR/nuefsd.log` (typically `/run/user/1000/nuefsd.log`), NOT stdout.
+## Layout
 
-```bash
-# View daemon logs
-cat /run/user/1000/nuefsd.log
-
-# Tail logs in real-time (from another terminal)
-tail -f /run/user/1000/nuefsd.log
-
-# Start daemon with custom log path
-nuefsd --log /tmp/nuefsd-debug.log
-
-# Enable debug logging via RUST_LOG (set before daemon starts)
-RUST_LOG=debug pixi run git-nue mount
 ```
-
-Log levels: `error`, `warn`, `info`, `debug`, `trace`
-
-## Development
-
-```bash
-pixi run develop  # Build and install the package
+nue/
+├── Cargo.toml
+├── README.md
+├── CLAUDE.md
+├── docs/design.md           # design doc (KEP-style)
+├── examples/demo.sh         # end-to-end smoke test
+└── src/
+    ├── main.rs              # clap CLI: filter-spec, sync, push
+    ├── manifest.rs          # nue.yaml schema + load + validate
+    ├── filter_spec.rs       # Manifest → josh filter string (unit tested)
+    ├── sync.rs              # bare clone, fetch, josh-filter, merge
+    └── push.rs              # reverse: host blobs → source commit + push
 ```
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   Python (pure, no Rust ext)                 │
-│  handle = nuefs.open(root)                                  │
-│  handle.update(entries)                                     │
-│  handle.which(path)                                         │
-│  handle.close()                                             │
-└─────────────────────────────────────────────────────────────┘
-                    │ gRPC over Unix socket
-                    │ (grpcio client, tonic server)
-                    ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Rust Daemon (nuefsd)                      │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
-│  │ IPC Server  │    │ Mount       │    │ FUSE        │     │
-│  │ prost/proto │───▶│ Manager     │───▶│ Sessions    │     │
-│  └─────────────┘    └─────────────┘    └─────────────┘     │
-└─────────────────────────────────────────────────────────────┘
+nue.yaml ──► manifest::Manifest ──► filter_spec ──► josh filter string
+                                                          │
+                                                          ▼
+.git/nue/<src>.git (bare clone)  ──┬── git fetch
+                                   ├── josh-filter <spec> → refs/nue/filtered
+                                   └── git fetch into host → refs/nue/<src>/filtered
+                                                          │
+                                                          ▼
+                                                host repo HEAD
+                                                (git merge with
+                                                 Nue-Source-<src>: trailer)
 ```
 
-IPC protocol: `proto/nuefs.proto` (single source of truth, defines `service NueFs`)
-- Rust side: tonic + prost (buf generate with protoc-gen-prost + protoc-gen-tonic)
-- Python side: grpcio + betterproto2 (buf generate with protoc-gen-python_betterproto2)
+No daemon. All state lives in:
+- `.git/nue/<src>.git/` — bare clones (one per source)
+- `Nue-Source-<src>: <sha>` trailer on the latest sync's merge commit
 
-## Project Structure
+## Vocabulary
 
-```
-nuefs/
-├── pixi.toml            # workspace orchestrator
-├── pyproject.toml        # Python package (hatchling)
-├── proto/nuefs.proto     # IPC protocol definition
-├── python/
-│   └── nuefs/
-│       ├── __init__.py   # public API re-exports
-│       ├── _ipc.py       # gRPC IPC client (grpcio)
-│       ├── _proto/       # generated betterproto2 + gRPC stub code
-│       ├── core.py       # dataclasses + Handle
-│       ├── manifest.py   # manifest parsing (.gitnue)
-│       ├── sources.py    # named source resolution
-│       └── cli.py        # CLI (git nue mount/unmount/status/stop/init/add/export/which)
-└── nuefsd/               # Rust daemon (self-contained)
-    ├── Cargo.toml
-    ├── pixi.toml         # pixi package for daemon
-    ├── recipe.yaml       # rattler-build recipe
-    └── src/
-        ├── lib.rs        # module declarations + proto include
-        ├── types.rs      # internal types + proto conversions
-        ├── nuefs/        # generated prost + tonic code (via buf generate)
-        ├── daemon/
-        │   ├── mod.rs
-        │   ├── server.rs # tonic gRPC server
-        │   ├── manager.rs# mount manager
-        │   └── fuse.rs   # FUSE implementation (fuser)
-        └── bin/
-            └── nuefsd.rs # daemon entry
-```
+- **source** — upstream repo, declared in `sources:` in `nue.yaml`
+- **graft** — one `(upstream path → host path)` mapping
+- **file graft / tree graft** — single file vs subdirectory grafts
+- **host** — your working repo (term-of-art for "receiver of a graft")
+- **sync** — pull from sources, filter, replay onto host HEAD
+- **push** — host-side edits → upstream commit on `refs/heads/nue-push/<src>`
+
+## Notes for collaborators
+
+- Use the **python skill** when writing/reviewing Python (currently none in
+  the codebase, but the smoke test creates Python files in synthetic repos)
+- Use the **ascii-visualizer skill** for any architecture/flow diagrams in
+  docs or PR descriptions
+
+## Generated code
+
+None right now. josh's filter spec is generated by `filter_spec.rs` at
+runtime from `nue.yaml`, but it's a string, not a file. No code-gen step,
+no `proto/`, no `buf` config.

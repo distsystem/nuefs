@@ -1,30 +1,9 @@
-# Python
-/.venv/
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
-*.egg-info/
-dist/
-
 # Rust
-/nuefsd/target/
+/target/
+Cargo.lock
 
 # IDE
 .DS_Store
 .idea/
 .vscode/
 *.swp
-
-# pixi
-.pixi/*
-!.pixi/config.toml
-
-# maturin
-*.so
-*.pyd
-findings.md
-progress.md
-task_plan.md
-nue.lock
-sheaves
