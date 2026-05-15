@@ -1,6 +1,6 @@
 [package]
 name = "nue"
-version = "0.0.1"
+version = "0.3.0"
 edition = "2024"
 description = "Proof-of-concept: file-level vendoring via josh filter + commit replay"
 license = "Apache-2.0"
